@@ -5,75 +5,112 @@ import pylidc as pl
 from tqdm import tqdm
 
 
-def generate_filename(scan):
-    # Get identifiers
+PROJECT_ROOT = Path(__file__).resolve().parents[3]
+OUTPUT_DIR = PROJECT_ROOT / "dataset" / "_lidc" / "001_volume_npy"
+
+
+def generate_filename(scan: pl.Scan) -> str:
+    """
+    Generate a unique filename for a LIDC-IDRI scan.
+
+    Format
+    ------
+    lidc_<patient_id>_<study_uid>_<series_uid>.npy
+    """
+
     patient_id = scan.patient_id
     study_uid = scan.study_instance_uid[-5:]
     series_uid = scan.series_instance_uid[-5:]
 
-    # Create filename
-    filename = (
-        f'lidc_{patient_id}_{study_uid}_{series_uid}.npy'
-    )
-
-    return filename
+    return f"lidc_{patient_id}_{study_uid}_{series_uid}.npy"
 
 
-def load_hu_volume(scan):
-    # Load DICOM images
-    images = scan.load_all_dicom_images()
+def load_hu_volume(scan: pl.Scan) -> str:
+    """
+    Load a CT scan as a 3D Hounsfield Unit (HU) volume.
 
-    # Stack slices
-    volumes = np.stack(
-        [image.pixel_array for image in images]
-    ).astype(np.int16)
+    Returns
+    -------
+    numpy.ndarray
+        CT volume with shape (z, y, x)
+        in Hounsfield Unit (HU).
+    """
 
-    # HU conversion
-    slope = float(images[0].RescaleSlope)
-    intercept = float(images[0].RescaleIntercept)
-    hu_volumes = volumes * slope + intercept
-
-    return hu_volumes.astype(np.int16)
+    return scan.to_volume().astype(np.int16)
 
 
-def save_volume(volume, output_dir, filename):
+def save_volume(
+        volume: np.ndarray, 
+        output_dir: Path, 
+        filename: str,
+    ) -> None:
+    """
+    Save a CT volume as a NumPy (.npy) file.
+    """
+
     output_path = output_dir / filename
     np.save(output_path, volume)
 
 
-def process_scan(scan, output_dir):
-    # Generate filename
+def convert_scan(
+        scan: pl.Scan,
+        output_dir: Path,
+) -> None:
+    """
+    Convert a single LIDC-IDRI scan into a NumPy file.
+    """
+
     filename = generate_filename(scan)
 
-    # Load and convert to HU
-    hu_volume = load_hu_volume(scan)
+    volume = load_hu_volume(scan)
 
-    # Save as .npy
-    save_volume(hu_volume, output_dir, filename)
+    save_volume(
+        volume=volume,
+        output_dir=output_dir,
+        filename=filename,
+    )
 
 
-def process_all_scans(output_dir):
+def convert_dataset(
+        output_dir: str | Path
+) -> None:
+    """
+    Convert all LIDC-IDRI scans into NumPy files.
+
+    Parameters
+    ----------
+    output_dir : str or Path
+        Directory to save converted .npy files.
+    """
+
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # Query all scans from the LIDC-IDRI dataset
     scans = pl.query(pl.Scan).all()
 
-    # Print total number of scans
-    print(f'Total scans: {len(scans)}')
+    print(f"Total scans : {len(scans)}")
 
-    # Process each scan
-    for scan in tqdm(scans, desc='Converting LIDC-IDRI', unit='scan'):
+    failed = []
+
+    for scan in tqdm(scans, desc="Converting LIDC-IDRI", unit="scan"):
         try:
-            process_scan(scan, output_dir)
+            convert_scan(scan=scan, output_dir=output_dir)
         except Exception as e:
+            failed.append(scan.patient_id)
             print(
-                f'\nFailed processing '
-                f'{scan.patient_id}: {e}'
+                f"\nFailed processing "
+                f"{scan.patient_id}: {e}"
             )
 
+    print("\nConversion finished")
+    print(f"Successful : {len(scans) - len(failed)}")
+    print(f"Failed     : {len(failed)}")
 
-if __name__ == '__main__':
-    process_all_scans(
-        output_dir='../dataset/npy_files/'
-    )
+    if failed:
+        print("\nFailed scans:")
+        for patient in failed:
+            print(f" - {patient}")
+
+
+if __name__ == "__main__":
+    convert_dataset(output_dir=OUTPUT_DIR)
