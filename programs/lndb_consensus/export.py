@@ -45,20 +45,18 @@ def save_consensus_slices(scan, output_dir):
     output_dir.mkdir(parents=True, exist_ok=True)
 
     for z in scan["consensus_slices"]:
+        output_dir = Path(output_dir)
+        output_dir.mkdir(
+            parents=True,
+            exist_ok=True,
+        )
 
-        filename = (
-            output_dir
-            / (
-                f"LNDb-{scan['lndb_id']:04d}"
-                f"_finding{scan['finding_id']}"
-                f"_slice{z}.npy"
+        for z in scan["consensus_slices"]:
+
+            np.save(
+                output_dir / f"slice_{z}.npy",
+                scan["consensus_mask_full"][z],
             )
-        )
-
-        np.save(
-            filename,
-            scan["consensus_mask_full"][z],
-        )
 
 
 def save_visualizations(scan, output_dir):

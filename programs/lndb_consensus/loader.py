@@ -11,7 +11,7 @@ def prepare_scan_data(row, data_dir, mask_dir):
     # Retrieve scan and finding identifiers
     lndb_id = row["lndbid"]
     finding_id = row["findingid"]
-    label = row["category"]
+    label = row["label"]
 
     # Construct CT image path and load image metadata
     ct_path = data_dir / f"LNDb-{lndb_id:04d}.mhd"

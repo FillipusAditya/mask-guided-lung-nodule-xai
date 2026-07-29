@@ -1,78 +1,84 @@
+from pathlib import Path
+
 import numpy as np
 import SimpleITK as sitk
-from pathlib import Path
 from tqdm import tqdm
 
 
-def load_scan(mhd_path: Path):
-    # Load CT scan
-    image = sitk.ReadImage(str(mhd_path))
+# Root directory of the project.
+PROJECT_ROOT = Path(__file__).resolve().parents[3]
 
-    # Convert to numpy array
-    volume = sitk.GetArrayFromImage(image).astype(np.int16)
+# Directory containing the original LNDb .mhd files.
+DATA_DIR = PROJECT_ROOT / "dataset" / "lndb" / "data"
 
-    # Extract voxel spacing
-    spacing = np.array(image.GetSpacing(), dtype=np.float32)
-
-    return volume, spacing
+# Directory where converted CT volumes will be stored.
+OUTPUT_DIR = PROJECT_ROOT / "dataset" / "_lndb" / "001_volume_npy"
 
 
-def save_volume(volume, volume_dir, filename):
-    # Save CT volume
-    np.save(volume_dir / filename, volume)
+def convert_dataset(
+    data_dir: str | Path,
+    output_dir: str | Path,
+) -> None:
+    """
+    Convert all LNDb CT scans into NumPy (.npy) volumes.
+    """
 
-
-def save_spacing(spacing: np.ndarray, spacing_dir, filename,):
-    # Save voxel spacing
-    np.save(spacing_dir / filename, spacing)
-
-
-def process_scan(mhd_path, volume_dir, spacing_dir):
-    # Load scan data
-    volume, spacing = load_scan(mhd_path)
-
-    # Generate output filename
-    filename = mhd_path.stem + ".npy"
-
-    # Save volume and spacing
-    save_volume(volume, volume_dir, filename)
-    save_spacing(spacing, spacing_dir, filename)
-
-
-def process_all_scans(lndb_dir, output_dir,):
-    lndb_dir = Path(lndb_dir)
+    # Convert input paths into Path objects.
+    data_dir = Path(data_dir)
     output_dir = Path(output_dir)
 
-    volume_dir = output_dir / "volume"
-    spacing_dir = output_dir / "spacing"
+    # Create the output directory if it does not already exist.
+    output_dir.mkdir(parents=True, exist_ok=True)
 
-    # Create output directories
-    volume_dir.mkdir(parents=True, exist_ok=True)
-    spacing_dir.mkdir(parents=True, exist_ok=True)
+    # Find all MetaImage files.
+    mhd_files = sorted(data_dir.glob("*.mhd"))
 
-    # Find all LNDb scans
-    mhd_files = sorted(lndb_dir.glob("*.mhd"))
+    print(f"Total scans : {len(mhd_files)}")
 
-    # Print total number of scans
-    print(f"Total scans: {len(mhd_files)}")
+    failed_scans = []
 
-    # Process each scan
-    for mhd_path in tqdm(mhd_files, desc="Converting LNDb", unit="scan"):
+    # Convert each CT scan into a NumPy volume.
+    for mhd_path in tqdm(
+        mhd_files,
+        desc="Converting LNDb",
+        unit="scan",
+    ):
         try:
-            process_scan(
-                mhd_path,
-                volume_dir,
-                spacing_dir,
-            )
-        except Exception as e:
+            # Read the CT scan.
+            image = sitk.ReadImage(str(mhd_path))
+
+            # Convert the image into a NumPy array with int16 data type.
+            volume = sitk.GetArrayFromImage(image).astype(np.int16)
+
+            # Generate the output filename.
+            filename = f"{mhd_path.stem}.npy"
+
+            # Save the CT volume.
+            np.save(output_dir / filename, volume)
+
+        except Exception as error:
+            failed_scans.append(mhd_path.stem)
+
             print(
                 f"\nFailed processing "
-                f"{mhd_path.name}: {e}"
+                f"{mhd_path.name}: {error}"
             )
+
+    successful = len(mhd_files) - len(failed_scans)
+
+    print("\nConversion finished")
+    print(f"Successful : {successful}")
+    print(f"Failed     : {len(failed_scans)}")
+
+    if failed_scans:
+        print("\nFailed scans:")
+
+        for scan_id in failed_scans:
+            print(f" - {scan_id}")
 
 
 if __name__ == "__main__":
-    process_all_scans(
-        lndb_dir="../../dataset/lndb/data",
-        output_dir="../../dataset/npy_files/lndb_npy",
+    convert_dataset(
+        data_dir=DATA_DIR,
+        output_dir=OUTPUT_DIR,
     )

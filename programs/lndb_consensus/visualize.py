@@ -8,6 +8,7 @@ from matplotlib.colors import ListedColormap
 from matplotlib.lines import Line2D
 from matplotlib.patches import Rectangle
 
+
 def show_ct_mask_overlay(
     ct_volume,
     mask_volume,

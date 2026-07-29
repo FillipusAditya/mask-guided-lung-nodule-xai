@@ -2,6 +2,7 @@ import math
 
 import numpy as np
 
+
 def stack_masks(scan):
     """
     Stack all cropped binary masks into a single 4D array.
@@ -22,11 +23,6 @@ def stack_masks(scan):
 def compute_agreement_map(scan):
     """
     Compute the voxel-wise agreement map from the stacked binary masks.
-
-    Returns
-    -------
-    dict
-        Updated scan dictionary containing the agreement map.
     """
 
     # Count how many radiologists annotated each voxel

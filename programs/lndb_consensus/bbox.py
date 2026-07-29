@@ -1,5 +1,6 @@
 import numpy as np
 
+
 def compute_bounding_boxes(scan):
     """
     Compute the axis-aligned bounding box for each radiologist's binary mask.
