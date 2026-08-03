@@ -1,171 +1,150 @@
+from pathlib import Path
+
 import torch
+import torch.optim as optim
+from tqdm import tqdm
+
 import albumentations as A
 from albumentations.pytorch import ToTensorV2
-from tqdm import tqdm
-import torch.nn as nn
-import torch.optim as optim
 
 from model import UNET
+from loss import BCEDiceLoss
 from utils import (
-    load_checkpoint,
-    save_checkpoint,
-    get_loaders,
+    create_dataloader,
     check_accuracy,
-    save_predictions_as_imgs,
+    save_checkpoint,
 )
 
-from loss import (
-    BCEDiceLoss
-)
 
+# Project directory
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+DATASET_ROOT = (
+    PROJECT_ROOT 
+    / "dataset" 
+    / "_segmentation_dataset"
+)
+OUTPUT_DIR = (
+    PROJECT_ROOT
+    / "segmentation"
+    / "unet_model"
+    / "train_result"
+)
 
 # Training configuration
-LEARNING_RATE = 1e-4
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-BATCH_SIZE = 16
-NUM_EPOCHS = 30
+print(DEVICE)
+LEARNING_RATE = 1e-4
+BATCH_SIZE = 8
+NUM_EPOCHS = 1
 NUM_WORKERS = 2
-IMAGE_HEIGHT = 160
-IMAGE_WIDTH = 240
 PIN_MEMORY = True
-LOAD_MODEL = False
-
-# LEARNING_RATE = 1e-4
-# DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-# BATCH_SIZE = 8
-# NUM_EPOCHS = 100
-# NUM_WORKERS = 8
-# IMAGE_HEIGHT = 256
-# IMAGE_WIDTH = 256
-# PIN_MEMORY = True
-# LOAD_MODEL = False
-
-# LEARNING_RATE = 1e-4
-# DEVICE = "cuda"
-# BATCH_SIZE = 8
-# NUM_EPOCHS = 100
-# NUM_WORKERS = 6
-# IMAGE_HEIGHT = 256
-# IMAGE_WIDTH = 256
-# PIN_MEMORY = True
-# LOAD_MODEL = False
-
-# Dataset directories
-TRAIN_IMG_DIR = "../../dataset/_lndb/008_consensus_v1_split/train/ct"
-TRAIN_MASK_DIR = "../../dataset/_lndb/008_consensus_v1_split/train/mask"
-VAL_IMG_DIR = "../../dataset/_lndb/008_consensus_v1_split/val/ct"
-VAL_MASK_DIR = "../../dataset/_lndb/008_consensus_v1_split/val/mask"
 
 
-def train_fn(loader, model, optimizer, loss_fn, scaler):
+def train_one_epoch(loader, model, optimizer, loss_fn,):
     """
     Train the model for one epoch.
     """
 
-    loop = tqdm(loader)
+    model.train()
 
-    for batch_idx, (data, targets) in enumerate(loop):
-        # Move data to the selected device
-        data = data.to(device=DEVICE)
-        targets = targets.float().unsqueeze(1).to(device=DEVICE)
+    running_loss = 0.0
 
-        # Forward pass with automatic mixed precision
-        with torch.amp.autocast("cuda"):
-            predictions = model(data)
-            loss = loss_fn(predictions, targets)
+    progress_bar = tqdm(loader, desc="Training", leave=False)
 
-        # Backpropagation and parameter update
+    for images, masks in progress_bar:
+        images = images.to(DEVICE)
+        masks = masks.to(DEVICE)
+
         optimizer.zero_grad()
-        scaler.scale(loss).backward()
-        scaler.step(optimizer)
-        scaler.update()
+        predictions = model(images)
+        loss = loss_fn(predictions, masks)
+        loss.backward()
+        optimizer.step()
 
-        # Display current training loss
-        loop.set_postfix(loss=loss.item())
+        running_loss += loss.item()
+
+        progress_bar.set_postfix(
+            loss=f"{loss.item():.4f}"
+        )
+
+    epoch_loss = running_loss / len(loader)
+
+    return epoch_loss
 
 
 def main():
     """
-    Configure data, initialize the model,
-    and execute the training process.
+    Execute the complete training pipeline.
     """
 
-    # Data augmentation for the training set
-    train_transform = A.Compose(
-        [
-            A.Resize(height=IMAGE_HEIGHT, width=IMAGE_WIDTH),
-            A.HorizontalFlip(p=0.5),
-            A.Rotate(
-                limit=10,
-                p=0.5,
-                border_mode=0,
-            ),
-            ToTensorV2(),
-        ],
+    train_transforms = A.Compose([
+        ToTensorV2(),
+    ])
+
+    val_transforms = A.Compose([
+        ToTensorV2(),
+    ])
+
+    train_loader = create_dataloader(
+        root_dir=DATASET_ROOT,
+        split="train",
+        transform=train_transforms,
+        batch_size=BATCH_SIZE,
+        shuffle=True,
+        num_workers=NUM_WORKERS,
+        pin_memory=PIN_MEMORY,
     )
 
-    # Preprocessing for the validation set
-    val_transforms = A.Compose(
-        [
-            A.Resize(height=IMAGE_HEIGHT, width=IMAGE_WIDTH),
-            ToTensorV2(),
-        ],
+    val_loader = create_dataloader(
+        root_dir=DATASET_ROOT,
+        split="val",
+        transform=val_transforms,
+        batch_size=BATCH_SIZE,
+        shuffle=False,
+        num_workers=NUM_WORKERS,
+        pin_memory=PIN_MEMORY,
     )
 
-    # Initialize model, loss function, and optimizer
     model = UNET(in_channels=1, out_channels=1).to(DEVICE)
-    pos_weight = torch.tensor([20.0], device=DEVICE)
+
+    pos_weight = torch.tensor(
+        [20.0],
+        device=DEVICE,
+    )
 
     loss_fn = BCEDiceLoss(
         pos_weight=pos_weight,
         bce_weight=0.5,
         dice_weight=0.5,
     )
-    optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE)
 
-    # Create training and validation data loaders
-    train_loader, val_loader = get_loaders(
-        TRAIN_IMG_DIR,
-        TRAIN_MASK_DIR,
-        VAL_IMG_DIR,
-        VAL_MASK_DIR,
-        BATCH_SIZE,
-        train_transform,
-        val_transforms,
-        NUM_WORKERS,
-        PIN_MEMORY,
+    optimizer = optim.Adam(
+        model.parameters(),
+        lr=LEARNING_RATE,
     )
 
-    # Optionally resume training from a saved checkpoint
-    if LOAD_MODEL:
-        load_checkpoint(torch.load("my_checkpoint.pth.tar"), model)
-
-    # Evaluate the model before training
-    check_accuracy(val_loader, model, device=DEVICE)
-
-    # Enable mixed precision training
-    scaler = torch.amp.GradScaler("cuda")
-
-    # Training loop
     for epoch in range(NUM_EPOCHS):
-        train_fn(train_loader, model, optimizer, loss_fn, scaler)
+        print(f"\nEpoch {epoch + 1}/{NUM_EPOCHS}")
 
-        # Save the current model checkpoint
+        train_loss = train_one_epoch(
+            loader=train_loader,
+            model=model,
+            optimizer=optimizer,
+            loss_fn=loss_fn,
+        )
+
+        print(f"Training Loss : {train_loss:.4f}")
+
+        check_accuracy(val_loader, model, device=DEVICE)
+
         checkpoint = {
             "state_dict": model.state_dict(),
             "optimizer": optimizer.state_dict(),
         }
-        save_checkpoint(checkpoint)
 
-        # Evaluate model performance on the validation set
-        check_accuracy(val_loader, model, device=DEVICE)
-
-        # Save predicted masks for visual inspection
-        save_predictions_as_imgs(
-            val_loader,
-            model,
-            folder="saved_images/",
-            device=DEVICE,
+        save_checkpoint(
+            checkpoint,
+            filename= OUTPUT_DIR / "checkpoint.pth.tar",
         )
 
 
