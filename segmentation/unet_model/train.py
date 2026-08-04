@@ -1,3 +1,4 @@
+from datetime import datetime
 from pathlib import Path
 
 import albumentations as A
@@ -7,50 +8,78 @@ import torch.optim as optim
 from albumentations.pytorch import ToTensorV2
 from tqdm import tqdm
 
-from loss import BCEDiceLoss
-from model import UNET
-from utils import (
+from segmentation.unet_model.model import UNET
+
+from segmentation.unet_utils import (
+    BCEDiceLoss,
     create_dataloader,
-    save_history,
+    create_training_log,
+    append_training_log,
+    save_training_config,
+    save_checkpoint,
+    save_best_model,
     set_seed,
 )
 
-
 # ---------------------------------------------------------------------
-# Project Paths
+# PROJECT
 # ---------------------------------------------------------------------
-
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
-DATASET_ROOT = (
-    PROJECT_ROOT
-    / "dataset"
-    / "_segmentation_dataset"
+#---------------------------------
+# OUTPUT
+#---------------------------------
+RESULT_DIR_NAME = (
+    datetime.now()
+    .strftime("result_%Y%m%d_%H%M")
 )
 
 OUTPUT_DIR = (
     PROJECT_ROOT
     / "segmentation"
     / "unet_model"
-    / "train_result"
+    / RESULT_DIR_NAME
 )
 
+TRAINING_LOG_PATH = (
+    OUTPUT_DIR
+    / "training_log.csv"
+)
+
+BEST_MODEL_PATH = (
+    OUTPUT_DIR
+    / "best_model.pth"
+)
+
+CHECKPOINT_PATH = (
+    OUTPUT_DIR
+    / "checkpoint_latest.pth"
+)
+
+OUTPUT_DIR.mkdir(
+    parents=True,
+    exist_ok=True,
+)
+
+#---------------------------------
+# DATASET
+#---------------------------------
+DATASET_ROOT = (
+    PROJECT_ROOT
+    / "dataset"
+    / "_segmentation_dataset"
+)
 
 # ---------------------------------------------------------------------
-# Training Configuration
+# TRAINING
 # ---------------------------------------------------------------------
-DEVICE = (
-    "cuda"
-    if torch.cuda.is_available()
-    else "cpu"
-)
 
 LEARNING_RATE = 1e-4
 BATCH_SIZE = 2
 NUM_EPOCHS = 1
 
 NUM_WORKERS = 0
-PIN_MEMORY = False
+PIN_MEMORY = torch.cuda.is_available()
 
 PRED_THRESHOLD = 0.5
 
@@ -61,16 +90,18 @@ POS_WEIGHT = 20.0
 BCE_WEIGHT = 0.5
 DICE_WEIGHT = 0.5
 
-HISTORY_KEYS = (
-    "train_loss",
-    "val_loss",
-    "dice",
-    "iou",
-    "precision",
-    "sensitivity",
-    "specificity",
+#---------------------------------
+# DEVICE
+#---------------------------------
+DEVICE = (
+    "cuda"
+    if torch.cuda.is_available()
+    else "cpu"
 )
 
+#---------------------------------
+# TRAIN ONE EPOCH
+#---------------------------------
 def train_one_epoch(
     loader,
     model: torch.nn.Module,
@@ -144,6 +175,9 @@ def train_one_epoch(
 
     return epoch_loss
 
+#---------------------------------
+# VALIDATE ONE EPOCH
+#---------------------------------
 def validate_one_epoch(
     loader,
     model: torch.nn.Module,
@@ -292,26 +326,22 @@ def validate_one_epoch(
     }
 
 
+#---------------------------------
+# MAIN FUNCTION
+#---------------------------------
 def main() -> None:
     """
     Execute the complete training pipeline.
     """
-
-    # -------------------------------------------------------------
-    # Initialize the training environment
-    # -------------------------------------------------------------
-
-    # Set random seed.
+    
+    # Set random seed
     set_seed(SEED)
 
-    # Create the output directory.
-    OUTPUT_DIR.mkdir(
-        parents=True,
-        exist_ok=True,
-    )
+    # Create training log header
+    create_training_log(TRAINING_LOG_PATH)
     
     # -------------------------------------------------------------
-    # Create data augmentation pipelines
+    # PREPARE AUGMENTATIONS PIPELINE
     # -------------------------------------------------------------
 
     train_transforms = A.Compose([
@@ -331,7 +361,7 @@ def main() -> None:
     ])
     
     # -------------------------------------------------------------
-    # Create dataloaders
+    # PREPARE DATASET & DATA LOADER
     # -------------------------------------------------------------
 
     train_loader = create_dataloader(
@@ -355,17 +385,13 @@ def main() -> None:
     )
     
     # -------------------------------------------------------------
-    # Initialize the model
+    # PREPARE MODEL
     # -------------------------------------------------------------
 
     model = UNET(
         in_channels=1,
         out_channels=1,
     ).to(DEVICE)
-    
-    # -------------------------------------------------------------
-    # Configure the loss function
-    # -------------------------------------------------------------
 
     pos_weight = torch.tensor(
         [POS_WEIGHT],
@@ -377,42 +403,50 @@ def main() -> None:
         bce_weight=BCE_WEIGHT,
         dice_weight=DICE_WEIGHT,
     )
-    
-    # -------------------------------------------------------------
-    # Configure the optimizer
-    # -------------------------------------------------------------
 
     optimizer = optim.Adam(
         model.parameters(),
         lr=LEARNING_RATE,
     )
     
-    # -------------------------------------------------------------
-    # Initialize training variables
-    # -------------------------------------------------------------
-
-    best_dice = 0.0
-
-    history = {
-        key: []
-        for key in HISTORY_KEYS
+    #---------------------------------
+    # TRAINING CONFIG
+    #---------------------------------
+    training_config = {
+        "architecture": "UNet",
+        "in_channels": 1,
+        "out_channels": 1,
+        "batch_size": BATCH_SIZE,
+        "learning_rate": LEARNING_RATE,
+        "num_epochs": NUM_EPOCHS,
+        "optimizer": "Adam",
+        "loss_function": "BCEDiceLoss",
+        "bce_weight": BCE_WEIGHT,
+        "dice_weight": DICE_WEIGHT,
+        "pos_weight": POS_WEIGHT,
+        "prediction_threshold": PRED_THRESHOLD,
+        "seed": SEED,
+        "device": DEVICE,
     }
+
+    save_training_config(
+        config=training_config,
+        save_path=OUTPUT_DIR / "training_config.json",
+    )
+    
+    # Initialize training variables
+    best_dice = 0.0
     
     # -------------------------------------------------------------
-    # Training Loop
+    # Training
     # -------------------------------------------------------------
-
     for epoch in range(NUM_EPOCHS):
-
         print()
         print("=" * 60)
         print(f"Epoch {epoch + 1}/{NUM_EPOCHS}")
         print("=" * 60)
 
-        # ---------------------------------------------------------
-        # Training
-        # ---------------------------------------------------------
-
+        # Train One Epoch
         train_loss = train_one_epoch(
             loader=train_loader,
             model=model,
@@ -420,32 +454,60 @@ def main() -> None:
             loss_fn=loss_fn,
         )
 
-        # ---------------------------------------------------------
-        # Validation
-        # ---------------------------------------------------------
-
+        # Validation One Epoch
         val_metrics = validate_one_epoch(
             loader=val_loader,
             model=model,
             loss_fn=loss_fn,
         )
 
-        # ---------------------------------------------------------
-        # Store history
-        # ---------------------------------------------------------
+        # Write Training Log
+        append_training_log(
+            log_path=TRAINING_LOG_PATH,
+            epoch=epoch + 1,
+            train_loss=train_loss,
+            val_loss=val_metrics["loss"],
+            dice_score=val_metrics["dice"],
+            iou=val_metrics["iou"],
+            precision=val_metrics["precision"],
+            sensitivity=val_metrics["sensitivity"],
+            specificity=val_metrics["specificity"],
+        )
+        
+        # Save Best Model
+        if val_metrics["dice"] > best_dice:
+            best_dice = val_metrics["dice"]
 
-        history["train_loss"].append(train_loss)
-        history["val_loss"].append(val_metrics["loss"])
-        history["dice"].append(val_metrics["dice"])
-        history["iou"].append(val_metrics["iou"])
-        history["precision"].append(val_metrics["precision"])
-        history["sensitivity"].append(val_metrics["sensitivity"])
-        history["specificity"].append(val_metrics["specificity"])
-
-        # ---------------------------------------------------------
-        # Print epoch summary
-        # ---------------------------------------------------------
-
+            save_best_model(
+                model=model,
+                save_path=BEST_MODEL_PATH,
+            )
+            
+            print(
+                f"Best model updated "
+                f"(Validation Loss: {val_metrics['loss']:.4f})"
+            )
+        
+        # Save complete checkpoint
+        save_checkpoint(
+            model=model,
+            optimizer=optimizer,
+            epoch=epoch + 1,
+            train_loss=train_loss,
+            val_loss=val_metrics["loss"],
+            dice_score=val_metrics["dice"],
+            iou=val_metrics["iou"],
+            precision=val_metrics["precision"],
+            sensitivity=val_metrics["sensitivity"],
+            specificity=val_metrics["specificity"],
+            best_dice=best_dice,
+            learning_rate=LEARNING_RATE,
+            batch_size=BATCH_SIZE,
+            save_path=CHECKPOINT_PATH,
+            architecture="UNet",
+        )
+        
+        # Display Epoch Summary
         print()
 
         print("Training")
@@ -461,39 +523,5 @@ def main() -> None:
         print(f"  Sensitivity  : {val_metrics['sensitivity']:.4f}")
         print(f"  Specificity  : {val_metrics['specificity']:.4f}")
 
-        # ---------------------------------------------------------
-        # Save best model
-        # ---------------------------------------------------------
-
-        if val_metrics["dice"] > best_dice:
-
-            best_dice = val_metrics["dice"]
-
-            checkpoint = {
-                "state_dict": model.state_dict(),
-                "optimizer": optimizer.state_dict(),
-            }
-
-            checkpoint_path = (
-                OUTPUT_DIR
-                / "best_checkpoint.pth.tar"
-            )
-
-            torch.save(
-                checkpoint,
-                checkpoint_path,
-            )
-
-            print()
-            print(
-                f"New best Dice Score : "
-                f"{best_dice:.4f}"
-            )
-
-            print(
-                f"Checkpoint saved to:"
-            )
-
-            print(
-                f"  {checkpoint_path}"
-            )
+if __name__ == "__main__":
+    main()
