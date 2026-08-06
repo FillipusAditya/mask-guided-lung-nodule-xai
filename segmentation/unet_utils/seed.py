@@ -1,12 +1,14 @@
+"""Reproducibility configuration for Python, NumPy, and PyTorch."""
+
 import random
 
 import numpy as np
 import torch
 
 
-#---------------------------------
+# ---------------------------------------------------------------------
 # RANDOM SEED
-#---------------------------------
+# ---------------------------------------------------------------------
 def set_seed(
     seed: int,
     deterministic: bool = True,
@@ -14,18 +16,17 @@ def set_seed(
     """
     Set the random seed for reproducible experiments.
 
-    This function configures the random number generators for
-    Python, NumPy, and PyTorch. It also configures cuDNN to
-    operate in deterministic or performance mode.
+    This function configures the random number generators for Python, NumPy,
+    and PyTorch. It also configures cuDNN for deterministic or performance
+    mode.
 
-    Args:
-        seed (int):
-            Random seed value.
-
-        deterministic (bool):
-            If True, configure cuDNN for deterministic and
-            reproducible results. If False, enable cuDNN
-            benchmarking for maximum performance.
+    Parameters
+    ----------
+    seed : int
+        Random seed value.
+    deterministic : bool, default=True
+        If true, configure cuDNN for deterministic, reproducible results. If
+        false, enable cuDNN benchmarking for better performance.
     """
 
     # Python random module

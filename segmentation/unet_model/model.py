@@ -5,7 +5,18 @@ import torchvision.transforms.functional as TF
 
 class DoubleConv(nn.Module):
     """
-    Two consecutive convolution blocks used throughout U-Net.
+    Two consecutive convolutional blocks used throughout the U-Net architecture.
+
+    Each block consists of a 2D convolution, batch normalization,
+    and ReLU activation. The two blocks preserve the spatial
+    dimensions of the input feature map while increasing the
+    representational capacity of the network.
+
+    Attributes
+    ----------
+    conv : nn.Sequential
+        Sequential container consisting of two convolutional
+        blocks.
     """
 
     def __init__(
@@ -15,6 +26,13 @@ class DoubleConv(nn.Module):
     ) -> None:
         """
         Initialize the double convolution block.
+
+        Parameters
+        ----------
+        in_channels : int
+            Number of input feature channels.
+        out_channels : int
+            Number of output feature channels.
         """
 
         super().__init__()
@@ -47,15 +65,44 @@ class DoubleConv(nn.Module):
         x: torch.Tensor,
     ) -> torch.Tensor:
         """
-        Forward propagation.
+        Perform forward propagation through the double convolution block.
+
+        Parameters
+        ----------
+        x : torch.Tensor
+            Input feature map of shape (N, C, H, W).
+
+        Returns
+        -------
+        torch.Tensor
+            Output feature map after two convolutional blocks.
         """
 
         return self.conv(x)
 
 
 class UNET(nn.Module):
-    """
+    """"
     Standard U-Net architecture for binary image segmentation.
+
+    The network consists of an encoder-decoder structure with skip
+    connections. The encoder progressively extracts high-level
+    features, while the decoder reconstructs the segmentation mask
+    using the encoder feature maps through skip connections.
+
+    Attributes
+    ----------
+    downs : nn.ModuleList
+        Encoder blocks.
+    ups : nn.ModuleList
+        Decoder blocks, consisting of transposed convolutions
+        followed by DoubleConv blocks.
+    pool : nn.MaxPool2d
+        Max-pooling layer used for downsampling.
+    bottleneck : DoubleConv
+        Double convolution block at the network bottleneck.
+    final_conv : nn.Conv2d
+        Final 1×1 convolution producing the segmentation logits.
     """
 
     def __init__(
@@ -66,6 +113,16 @@ class UNET(nn.Module):
     ) -> None:
         """
         Initialize the U-Net model.
+
+        Parameters
+        ----------
+        in_channels : int, default=1
+            Number of input image channels.
+        out_channels : int, default=1
+            Number of output segmentation channels.
+            For binary segmentation, this should be 1.
+        features : tuple[int, ...], default=(64, 128, 256, 512)
+            Number of feature channels used at each encoder level.
         """
 
         super().__init__()
@@ -132,7 +189,23 @@ class UNET(nn.Module):
         x: torch.Tensor,
     ) -> torch.Tensor:
         """
-        Forward propagation.
+        Perform forward propagation through the U-Net.
+
+        The input image is processed by the encoder, bottleneck,
+        and decoder. Skip connections are used to concatenate
+        encoder feature maps with decoder feature maps at the
+        corresponding resolution.
+
+        Parameters
+        ----------
+        x : torch.Tensor
+            Input image tensor of shape (N, C, H, W).
+
+        Returns
+        -------
+        torch.Tensor
+            Segmentation logits of shape
+            (N, out_channels, H, W).
         """
 
         skip_connections = []
@@ -184,8 +257,11 @@ class UNET(nn.Module):
 
 def test() -> None:
     """
-    Verify that the network preserves
-    the input spatial dimensions.
+    Verify that the U-Net preserves the input spatial dimensions.
+
+    A random input tensor is passed through the network, and an
+    assertion is performed to ensure that the output tensor has
+    the same shape as the input tensor.
     """
 
     images = torch.randn(

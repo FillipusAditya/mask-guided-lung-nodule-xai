@@ -1,3 +1,5 @@
+"""Dataset implementation for 2D lung nodule segmentation samples."""
+
 from pathlib import Path
 
 import numpy as np
@@ -107,6 +109,34 @@ class LungDataset(Dataset):
         # Load CT image and segmentation mask.
         ct = np.load(ct_path).astype(np.float32)
         mask = np.load(mask_path).astype(np.float32)
+
+        # Validate the loaded sample before applying transformations.
+        if ct.shape != mask.shape:
+            raise ValueError(
+                "Image and mask shapes do not match.\n"
+                f"File      : {filename}\n"
+                f"CT shape  : {ct.shape}\n"
+                f"Mask shape: {mask.shape}"
+            )
+
+        unique_values = np.unique(mask)
+
+        if not np.all(np.isin(unique_values, [0.0, 1.0])):
+            raise ValueError(
+                "Mask contains non-binary values.\n"
+                f"File         : {filename}\n"
+                f"Unique values: {unique_values}"
+            )
+
+        if ct.ndim != 2:
+            raise ValueError(
+                f"Expected 2D CT image, got shape {ct.shape}"
+            )
+
+        if mask.ndim != 2:
+            raise ValueError(
+                f"Expected 2D mask, got shape {mask.shape}"
+            )
 
         # Apply Albumentations transforms.
         if self.transform is not None:

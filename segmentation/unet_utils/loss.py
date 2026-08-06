@@ -1,10 +1,12 @@
+"""Loss functions for binary lung nodule segmentation."""
+
 import torch
 import torch.nn as nn
 
 
 class DiceLoss(nn.Module):
     """
-    Dice loss for binary image segmentation.
+    Compute Dice loss for binary image segmentation.
     """
 
     def __init__(
@@ -45,6 +47,11 @@ class DiceLoss(nn.Module):
             Dice loss.
         """
 
+        # Compute Dice entirely in FP32 to prevent overflow in large reductions
+        # when model logits are produced under mixed precision.
+        logits = logits.float()
+        targets = targets.float()
+
         # Convert logits to probabilities.
         probabilities = torch.sigmoid(logits)
 
@@ -70,7 +77,7 @@ class DiceLoss(nn.Module):
 
 class BCEDiceLoss(nn.Module):
     """
-    Weighted combination of BCEWithLogitsLoss and Dice Loss.
+    Combine BCE-with-logits and Dice losses using configurable weights.
     """
 
     def __init__(
