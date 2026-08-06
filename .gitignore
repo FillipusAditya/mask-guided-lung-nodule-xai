@@ -33,7 +33,7 @@ Thumbs.db
 *.ckpt
 
 # Dataset
-dataset/
-dataset_sample/
+000_dataset/
 
-segmentation/unet_model/result_*/
+# Result
+002_segmentation/*/result_*/
