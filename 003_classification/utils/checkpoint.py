@@ -1,3 +1,5 @@
+"""Utilities for saving and restoring classification checkpoints."""
+
 from pathlib import Path
 
 import torch
@@ -13,14 +15,15 @@ def save_best_model(
     save_path: Path,
 ) -> None:
     """
-    Save the best model weights.
+    Save model parameters associated with the best validation result.
 
-    Args:
-        model (nn.Module):
-            Model whose weights will be saved.
+    Parameters
+    ----------
+    model : nn.Module
+        Model whose weights will be saved.
 
-        save_path (Path):
-            Output path for the model weights.
+    save_path : Path
+        Output path for the model parameters.
     """
 
     torch.save(
@@ -45,47 +48,52 @@ def save_checkpoint(
     architecture: str = "Transfer Learning ResNet50",
 ) -> None:
     """
-    Save the latest training checkpoint.
+    Save the latest classification training checkpoint.
 
-    Args:
-        model (nn.Module):
-            Model being trained.
+    The checkpoint contains the model and optimizer states together with the
+    current training progress, configuration, and metrics required to inspect
+    or continue the run.
 
-        optimizer (Optimizer):
-            Optimizer used during training.
+    Parameters
+    ----------
+    model : nn.Module
+        Model being trained.
 
-        epoch (int):
-            Current epoch number.
+    optimizer : Optimizer
+        Optimizer used during training.
 
-        train_loss (float):
-            Training loss.
+    epoch : int
+        Current epoch number.
 
-        train_accuracy (float):
-            Training accuracy.
+    train_loss : float
+        Training loss.
 
-        val_loss (float):
-            Validation loss.
+    train_accuracy : float
+        Training accuracy.
 
-        val_accuracy (float):
-            Validation accuracy.
+    val_loss : float
+        Validation loss.
 
-        best_val_loss (float):
-            Best validation loss observed so far.
+    val_accuracy : float
+        Validation accuracy.
 
-        num_classes (int):
-            Number of output classes.
+    best_val_loss : float
+        Best validation loss observed so far.
 
-        learning_rate (float):
-            Learning rate.
+    num_classes : int
+        Number of output classes.
 
-        batch_size (int):
-            Mini-batch size.
+    learning_rate : float
+        Learning rate.
 
-        save_path (Path):
-            Output path for the checkpoint.
+    batch_size : int
+        Mini-batch size.
 
-        architecture (str):
-            Model architecture name.
+    save_path : Path
+        Output path for the checkpoint.
+
+    architecture : str, default="Transfer Learning ResNet50"
+        Model architecture name.
     """
 
     # Save the training checkpoint
@@ -112,24 +120,26 @@ def load_checkpoint(
     checkpoint_path: Path,
     model: nn.Module,
     optimizer: Optimizer | None = None,
-) -> dict:
+) -> dict[str, object]:
     """
     Load a training checkpoint.
 
-    Args:
-        checkpoint_path (Path):
-            Path to the checkpoint file.
+    Parameters
+    ----------
+    checkpoint_path : Path
+        Path to the checkpoint file.
 
-        model (nn.Module):
-            Model into which the weights will be loaded.
+    model : nn.Module
+        Model into which the weights will be loaded.
 
-        optimizer (Optimizer | None):
-            Optimizer into which the optimizer state will be loaded.
-            If None, only the model weights are restored.
+    optimizer : Optimizer, optional
+        Optimizer into which the optimizer state will be loaded. If omitted,
+        only the model parameters are restored.
 
-    Returns:
-        dict:
-            Dictionary containing the checkpoint contents.
+    Returns
+    -------
+    dict[str, object]
+        Dictionary containing the checkpoint contents.
     """
 
     # Load the checkpoint

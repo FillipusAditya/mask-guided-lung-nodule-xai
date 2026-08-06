@@ -1,3 +1,5 @@
+"""Public utility functions for classification training."""
+
 #---------------------------------
 # CHECKPOINT
 #---------------------------------

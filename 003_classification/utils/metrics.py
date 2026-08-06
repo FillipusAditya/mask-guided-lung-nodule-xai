@@ -1,3 +1,5 @@
+"""Plot classification training and validation metrics."""
+
 from pathlib import Path
 
 import matplotlib.pyplot as plt
@@ -18,24 +20,25 @@ def plot_curve(
     """
     Plot the training and validation metric curves.
 
-    Args:
-        df (pd.DataFrame):
-            DataFrame containing the training history.
+    Parameters
+    ----------
+    df : pd.DataFrame
+        DataFrame containing the training history.
 
-        train_column (str):
-            Column name for the training metric.
+    train_column : str
+        Column name for the training metric.
 
-        val_column (str):
-            Column name for the validation metric.
+    val_column : str
+        Column name for the validation metric.
 
-        ylabel (str):
-            Label for the y-axis.
+    ylabel : str
+        Label for the y-axis.
 
-        title (str):
-            Figure title.
+    title : str
+        Figure title.
 
-        save_path (Path):
-            Output path for the generated figure.
+    save_path : Path
+        Output path for the generated figure.
     """
 
     # Create a new figure
@@ -88,12 +91,13 @@ def plot_loss_curve(
     """
     Plot the training and validation loss curves.
 
-    Args:
-        df (pd.DataFrame):
-            DataFrame containing the training history.
+    Parameters
+    ----------
+    df : pd.DataFrame
+        DataFrame containing the training history.
 
-        output_dir (Path):
-            Directory where the figure will be saved.
+    output_dir : Path
+        Directory where the figure will be saved.
     """
 
     plot_curve(
@@ -113,12 +117,13 @@ def plot_accuracy_curve(
     """
     Plot the training and validation accuracy curves.
 
-    Args:
-        df (pd.DataFrame):
-            DataFrame containing the training history.
+    Parameters
+    ----------
+    df : pd.DataFrame
+        DataFrame containing the training history.
 
-        output_dir (Path):
-            Directory where the figure will be saved.
+    output_dir : Path
+        Directory where the figure will be saved.
     """
 
     plot_curve(

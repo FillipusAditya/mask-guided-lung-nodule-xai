@@ -1,3 +1,5 @@
+"""Helpers for persisting classification metrics and configuration."""
+
 import csv
 import json
 from pathlib import Path
@@ -12,9 +14,10 @@ def create_training_log(
     """
     Create the training log CSV file.
 
-    Args:
-        log_path (Path):
-            Path to the training log CSV file.
+    Parameters
+    ----------
+    log_path : Path
+        Path to the training log CSV file.
     """
 
     with open(log_path, "w", newline="") as file:
@@ -42,24 +45,25 @@ def append_training_log(
     """
     Append one epoch of training results to the CSV file.
 
-    Args:
-        log_path (Path):
-            Path to the training log CSV file.
+    Parameters
+    ----------
+    log_path : Path
+        Path to the training log CSV file.
 
-        epoch (int):
-            Current epoch number.
+    epoch : int
+        Current epoch number.
 
-        train_loss (float):
-            Training loss.
+    train_loss : float
+        Training loss.
 
-        train_accuracy (float):
-            Training accuracy.
+    train_accuracy : float
+        Training accuracy.
 
-        val_loss (float):
-            Validation loss.
+    val_loss : float
+        Validation loss.
 
-        val_accuracy (float):
-            Validation accuracy.
+    val_accuracy : float
+        Validation accuracy.
     """
 
     with open(log_path, "a", newline="") as file:
@@ -80,18 +84,19 @@ def append_training_log(
 # TRAINING CONFIGURATION
 #---------------------------------
 def save_training_config(
-    config: dict,
+    config: dict[str, object],
     save_path: Path,
 ) -> None:
     """
     Save the training configuration as a JSON file.
 
-    Args:
-        config (dict):
-            Dictionary containing the training configuration.
+    Parameters
+    ----------
+    config : dict[str, object]
+        Dictionary containing the training configuration.
 
-        save_path (Path):
-            Path to the output JSON file.
+    save_path : Path
+        Path to the output JSON file.
     """
 
     with open(save_path, "w") as file:

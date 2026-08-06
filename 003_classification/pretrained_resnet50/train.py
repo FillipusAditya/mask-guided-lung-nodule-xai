@@ -1,3 +1,5 @@
+"""Train a pretrained ResNet-50 model for image classification."""
+
 from datetime import datetime
 from pathlib import Path
 
@@ -120,16 +122,42 @@ DEVICE = torch.device(
 # TRAIN ONE EPOCH
 #---------------------------------
 def train_one_epoch(
-    epoch,
-    num_epochs,
-    model,
-    train_loader,
-    optimizer,
-    criterion,
-    device,
-):
+    epoch: int,
+    num_epochs: int,
+    model: nn.Module,
+    train_loader: DataLoader,
+    optimizer: torch.optim.Optimizer,
+    criterion: nn.Module,
+    device: torch.device,
+) -> tuple[float, float]:
     """
-    Train the model for one epoch.
+    Train the classification model for one epoch.
+
+    This function performs one complete pass over the training dataset,
+    computes the loss and gradients for each mini-batch, updates the trainable
+    model parameters, and accumulates sample-weighted training metrics.
+
+    Parameters
+    ----------
+    epoch : int
+        Current training epoch as a zero-based index.
+    num_epochs : int
+        Total number of training epochs.
+    model : nn.Module
+        Classification model to train.
+    train_loader : DataLoader
+        DataLoader providing training image-label pairs.
+    optimizer : torch.optim.Optimizer
+        Optimizer used to update trainable model parameters.
+    criterion : nn.Module
+        Loss function used to optimize the model.
+    device : torch.device
+        Device on which the model and mini-batches are stored.
+
+    Returns
+    -------
+    tuple[float, float]
+        Average training loss and classification accuracy for the epoch.
     """
 
     # Enable training mode
@@ -156,23 +184,18 @@ def train_one_epoch(
         labels = labels.to(device)
 
         # Clear gradients from the previous iteration
-        optimizer.zero_grad(
-            set_to_none=True
-        )
+        optimizer.zero_grad(set_to_none=True)
 
         # Perform the forward pass
         outputs = model(images)
 
         # Compute the training loss
-        loss = criterion(
-            outputs,
-            labels,
-        )
+        loss = criterion(outputs, labels)
 
-        # Compute gradients
+        # Backpropagation
         loss.backward()
 
-        # Update the trainable parameters
+        # Update model parameters
         optimizer.step()
 
         # Convert logits into predicted class indices
@@ -210,24 +233,48 @@ def train_one_epoch(
 # VALIDATE ONE EPOCH
 #---------------------------------
 def validate_one_epoch(
-    epoch,
-    num_epochs,
-    model,
-    val_loader,
-    criterion,
-    device,
-):
+    epoch: int,
+    num_epochs: int,
+    model: nn.Module,
+    val_loader: DataLoader,
+    criterion: nn.Module,
+    device: torch.device,
+) -> tuple[float, float]:
     """
-    Validate the model for one epoch.
+    Evaluate the classification model for one epoch.
+
+    Model parameters are not updated during validation. The function performs
+    one complete pass over the validation dataset and computes sample-weighted
+    validation loss and classification accuracy.
+
+    Parameters
+    ----------
+    epoch : int
+        Current validation epoch as a zero-based index.
+    num_epochs : int
+        Total number of training epochs.
+    model : nn.Module
+        Classification model to evaluate.
+    val_loader : DataLoader
+        DataLoader providing validation image-label pairs.
+    criterion : nn.Module
+        Loss function used to evaluate model predictions.
+    device : torch.device
+        Device on which the model and mini-batches are stored.
+
+    Returns
+    -------
+    tuple[float, float]
+        Average validation loss and classification accuracy for the epoch.
     """
 
     # Enable evaluation mode
     model.eval()
 
     # Initialize validation statistics
-    val_running_loss = 0.0
-    val_correct_predictions = 0
-    val_total_samples = 0
+    running_loss = 0.0
+    correct_predictions = 0
+    total_samples = 0
 
     # Create the validation progress bar
     progress_bar = tqdm(
@@ -260,26 +307,26 @@ def validate_one_epoch(
             predictions = outputs.argmax(dim=1)
 
             # Update validation statistics
-            val_running_loss += (
+            running_loss += (
                 loss.item()
                 * labels.size(0)
             )
 
-            val_correct_predictions += (
+            correct_predictions += (
                 predictions == labels
             ).sum().item()
 
-            val_total_samples += labels.size(0)
+            total_samples += labels.size(0)
 
             # Update the progress bar
             progress_bar.set_postfix(
-                loss=f"{val_running_loss / val_total_samples:.4f}",
-                acc=f"{100 * val_correct_predictions / val_total_samples:.2f}%",
+                loss=f"{running_loss / total_samples:.4f}",
+                acc=f"{100 * correct_predictions / total_samples:.2f}%",
             )
 
     # Compute validation metrics
-    val_loss = val_running_loss / val_total_samples
-    val_accuracy = val_correct_predictions / val_total_samples
+    val_loss = running_loss / total_samples
+    val_accuracy = correct_predictions / total_samples
 
     return (
         val_loss,
@@ -290,7 +337,9 @@ def validate_one_epoch(
 #---------------------------------
 # MAIN FUNCTION
 #---------------------------------
-def main():
+def main() -> None:
+    """Execute the complete pretrained ResNet-50 training pipeline."""
+
     # Set random seed
     set_seed(seed=SEED, deterministic=True)
     
