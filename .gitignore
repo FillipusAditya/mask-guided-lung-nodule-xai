@@ -35,3 +35,5 @@ Thumbs.db
 # Dataset
 dataset/
 dataset_sample/
+
+segmentation/unet_model/result_*/
