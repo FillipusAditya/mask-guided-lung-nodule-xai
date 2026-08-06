@@ -3,7 +3,7 @@ from pathlib import Path
 import pandas as pd
 from tqdm import tqdm
 
-from lndb_consensus import (
+from programs.lndb_consensus import (
     prepare_scan_data,
     process_scan,
     save_consensus_slices,

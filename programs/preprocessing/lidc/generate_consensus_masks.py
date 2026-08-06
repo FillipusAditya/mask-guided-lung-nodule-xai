@@ -16,7 +16,7 @@ METADATA_CSV_PATH = (
     / "dataset"
     / "_lidc"
     / "000_metadata"
-    / "cluster_metadata_cleaned.csv"
+    / "002_cluster_metadata_cleaned_v2.csv"
 )
 
 # Directory where consensus masks will be stored
@@ -24,7 +24,7 @@ OUTPUT_DIRECTORY = (
     PROJECT_ROOT
     / "dataset"
     / "_lidc"
-    / "consensus_nodules"
+    / "007_consensus_nodules_npy_v2"
 )
 
 # Metadata with an additional column containing the consensus mask path
@@ -33,7 +33,7 @@ OUTPUT_METADATA_CSV_PATH = (
     / "dataset"
     / "_lidc"
     / "000_metadata"
-    / "cluster_metadata_cleaned_path.csv"
+    / "003_cluster_metadata_cleaned_path_v2.csv"
 )
 
 
@@ -120,12 +120,15 @@ def generate_consensus_masks(
                 clevel=0.5,
             )
 
-            _, _, z_bbox = consensus_bbox
+            y_bbox, x_bbox, z_bbox = consensus_bbox
 
-            # Save each consensus slice separately
+            # Save only slices containing at least one consensus voxel.
             for local_slice_index, original_slice_index in enumerate(
                 range(z_bbox.start, z_bbox.stop)
             ):
+                # Skip slices without consensus voxels
+                if not np.any(consensus_mask[:, :, local_slice_index]):
+                    continue
 
                 # Create an empty mask with the same height and width as the
                 # original CT slice.
@@ -137,8 +140,8 @@ def generate_consensus_masks(
                 # Insert the consensus mask back into its original image
                 # coordinates using the bounding box.
                 full_slice_mask[
-                    consensus_bbox[0],
-                    consensus_bbox[1],
+                    y_bbox,
+                    x_bbox,
                 ] = consensus_mask[:, :, local_slice_index]
 
                 # Save the reconstructed full-size mask.
