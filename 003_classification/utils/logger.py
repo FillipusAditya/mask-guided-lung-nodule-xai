@@ -27,20 +27,40 @@ def create_training_log(
         # Write the CSV header
         writer.writerow([
             "epoch",
+            "learning_rate",
+            "scheduler_updated",
+            "patience_counter",
+            "early_stop_counter",
+            "stopped_early",
             "train_loss",
             "train_accuracy",
             "val_loss",
             "val_accuracy",
+            "sensitivity",
+            "specificity",
+            "precision",
+            "f1_score",
+            "auc",
         ])
 
 
 def append_training_log(
     log_path: Path,
     epoch: int,
+    learning_rate: float,
+    scheduler_updated: bool,
+    patience_counter: int,
+    early_stop_counter: int,
+    stopped_early: bool,
     train_loss: float,
     train_accuracy: float,
     val_loss: float,
     val_accuracy: float,
+    sensitivity: float,
+    specificity: float,
+    precision: float,
+    f1_score: float,
+    auc_score: float,
 ) -> None:
     """
     Append one epoch of training results to the CSV file.
@@ -53,6 +73,23 @@ def append_training_log(
     epoch : int
         Current epoch number.
 
+    learning_rate : float
+        Learning rate after the scheduler update.
+
+    scheduler_updated : bool
+        Whether the scheduler changed the learning rate in this epoch.
+
+    patience_counter : int
+        Number of consecutive epochs without sufficient improvement tracked
+        by the scheduler.
+
+    early_stop_counter : int
+        Number of consecutive epochs without sufficient improvement tracked
+        by early stopping.
+
+    stopped_early : bool
+        Whether early stopping ended training in this epoch.
+
     train_loss : float
         Training loss.
 
@@ -64,6 +101,21 @@ def append_training_log(
 
     val_accuracy : float
         Validation accuracy.
+
+    sensitivity : float
+        Validation sensitivity or recall.
+
+    specificity : float
+        Validation specificity.
+
+    precision : float
+        Validation precision.
+
+    f1_score : float
+        Validation F1-score.
+
+    auc_score : float
+        Validation ROC AUC.
     """
 
     with open(log_path, "a", newline="") as file:
@@ -73,10 +125,20 @@ def append_training_log(
         # Write one epoch of training results
         writer.writerow([
             epoch,
+            learning_rate,
+            scheduler_updated,
+            patience_counter,
+            early_stop_counter,
+            stopped_early,
             train_loss,
             train_accuracy,
             val_loss,
             val_accuracy,
+            sensitivity,
+            specificity,
+            precision,
+            f1_score,
+            auc_score,
         ])
 
 

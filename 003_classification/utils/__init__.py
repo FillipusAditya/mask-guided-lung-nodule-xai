@@ -10,6 +10,13 @@ from .checkpoint import (
 )
 
 #---------------------------------
+# EARLY STOPPING
+#---------------------------------
+from .early_stopping import (
+    EarlyStopping,
+)
+
+#---------------------------------
 # LOGGER
 #---------------------------------
 from .logger import (
@@ -22,9 +29,15 @@ from .logger import (
 # PLOTTING
 #---------------------------------
 from .metrics import (
+    compute_auc,
+    compute_classification_metrics,
     plot_accuracy_curve,
+    plot_confusion_matrix,
     plot_curve,
     plot_loss_curve,
+    plot_roc_curve,
+    plot_validation_metrics_curve,
+    update_confusion_matrix,
 )
 
 #---------------------------------
