@@ -1,11 +1,35 @@
+"""Load LNDb CT volumes, annotations, and image geometry metadata."""
+
 from pathlib import Path
+from typing import Any, Mapping
 
 import numpy as np
 import SimpleITK as sitk
 
-def prepare_scan_data(row, data_dir, mask_dir):
+
+def prepare_scan_data(
+    row: Mapping[str, Any],
+    data_dir: Path,
+    mask_dir: Path,
+) -> dict[str, Any]:
     """
     Prepare CT scan and annotation metadata for a single finding.
+
+    Parameters
+    ----------
+    row : Mapping[str, Any]
+        Metadata record containing LNDb scan, finding, label, and radiologist
+        identifiers.
+    data_dir : Path
+        Directory containing LNDb CT volumes in MetaImage format.
+    mask_dir : Path
+        Directory containing radiologist annotation volumes.
+
+    Returns
+    -------
+    dict[str, Any]
+        Scan metadata and radiologist-specific annotation metadata required by
+        the consensus pipeline.
     """
 
     # Retrieve scan and finding identifiers
@@ -69,10 +93,27 @@ def prepare_scan_data(row, data_dir, mask_dir):
     }
 
 
-def verify_scan_metadata(scan):
+def verify_scan_metadata(
+    scan: dict[str, Any],
+) -> bool:
     """
     Verify that all radiologist masks have the same image geometry
     as the corresponding CT scan.
+
+    Parameters
+    ----------
+    scan : dict[str, Any]
+        Scan metadata containing CT and radiologist mask geometry.
+
+    Returns
+    -------
+    bool
+        True when every radiologist mask matches the CT image geometry.
+
+    Raises
+    ------
+    ValueError
+        If any mask differs from the CT in size, spacing, origin, or direction.
     """
 
     for radiologist in scan["radiologists"]:
@@ -120,9 +161,22 @@ def verify_scan_metadata(scan):
     return True
 
 
-def load_scan(scan):
+def load_scan(
+    scan: dict[str, Any],
+) -> dict[str, Any]:
     """
     Load CT volume and extract binary masks for each radiologist annotation.
+
+    Parameters
+    ----------
+    scan : dict[str, Any]
+        Prepared scan metadata containing CT and radiologist mask paths.
+
+    Returns
+    -------
+    dict[str, Any]
+        Updated scan state containing the CT array, binary nodule masks, and
+        annotated slice indices for every radiologist.
     """
 
     # Load CT volume

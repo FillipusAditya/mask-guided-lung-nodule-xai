@@ -1,3 +1,5 @@
+"""LNDb-specific multi-radiologist nodule consensus utilities."""
+
 from .loader import prepare_scan_data
 from .pipeline import process_scan
 

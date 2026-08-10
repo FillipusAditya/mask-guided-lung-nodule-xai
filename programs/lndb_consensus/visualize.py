@@ -1,4 +1,8 @@
+"""Visualization helpers for LNDb radiologist agreement and consensus masks."""
+
 import math
+from pathlib import Path
+from typing import Any, Sequence
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -10,21 +14,46 @@ from matplotlib.patches import Rectangle
 
 
 def show_ct_mask_overlay(
-    ct_volume,
-    mask_volume,
-    slices,
-    bbox=None,
-    n_columns=5,
-    figsize_per_subplot=3,
-    mask_cmap="autumn",
-    mask_alpha=0.7,
-    vmin=0,
-    vmax=None,
-    save_path=None,
-):
+    ct_volume: np.ndarray,
+    mask_volume: np.ndarray,
+    slices: Sequence[int] | np.ndarray,
+    bbox: dict[str, int] | None = None,
+    n_columns: int = 5,
+    figsize_per_subplot: float = 3,
+    mask_cmap: str = "autumn",
+    mask_alpha: float = 0.7,
+    vmin: float = 0,
+    vmax: float | None = None,
+    save_path: str | Path | None = None,
+) -> None:
     """
     Display CT slices with a mask overlay and an optional bounding box.
 
+    Parameters
+    ----------
+    ct_volume : np.ndarray
+        Three-dimensional CT volume indexed in ``(z, y, x)`` order.
+    mask_volume : np.ndarray
+        Three-dimensional mask or agreement volume aligned with ``ct_volume``.
+    slices : Sequence[int] or np.ndarray
+        Indices of axial slices to display.
+    bbox : dict[str, int], optional
+        Axis-aligned bounding box in the original volume coordinates.
+    n_columns : int, default=5
+        Number of subplot columns.
+    figsize_per_subplot : float, default=3
+        Width and height allocated to each subplot in inches.
+    mask_cmap : str, default="autumn"
+        Matplotlib colormap used for the mask overlay.
+    mask_alpha : float, default=0.7
+        Opacity of the mask overlay.
+    vmin : float, default=0
+        Lower bound used to normalize mask colors.
+    vmax : float, optional
+        Upper bound used to normalize mask colors. If omitted, the maximum
+        mask value is used.
+    save_path : str or Path, optional
+        Figure output path. If omitted, the figure is displayed interactively.
     """
 
     # Exit if there are no slices to visualize.
@@ -139,10 +168,21 @@ def show_ct_mask_overlay(
         plt.close()
 
 
-def show_consensus_bbox(scan, save_path=None):
+def show_consensus_bbox(
+    scan: dict[str, Any],
+    save_path: str | Path | None = None,
+) -> None:
     """
     Display one CT slice that is annotated by every radiologist together with
     each radiologist's bounding box and the consensus bounding box.
+
+    Parameters
+    ----------
+    scan : dict[str, Any]
+        Processed scan state containing CT data, radiologist annotations, and
+        individual and consensus bounding boxes.
+    save_path : str or Path, optional
+        Figure output path. If omitted, the figure is displayed interactively.
     """
 
     ct_volume = scan["ct_volume"]
@@ -251,15 +291,32 @@ def show_consensus_bbox(scan, save_path=None):
 
 
 def show_agreement_map(
-    scan,
-    slices=None,
-    alpha=0.6,
-    n_columns=5,
-    figsize_per_subplot=3,
-    save_path=None,
-):
+    scan: dict[str, Any],
+    slices: Sequence[int] | np.ndarray | None = None,
+    alpha: float = 0.6,
+    n_columns: int = 5,
+    figsize_per_subplot: float = 3,
+    save_path: str | Path | None = None,
+) -> None:
     """
     Display the cropped CT slices with the agreement map overlay.
+
+    Parameters
+    ----------
+    scan : dict[str, Any]
+        Processed scan state containing cropped CT data, agreement values,
+        crop origin, and radiologist annotations.
+    slices : Sequence[int] or np.ndarray, optional
+        Cropped-volume slice indices to display. If omitted, all slices with
+        nonzero agreement are selected.
+    alpha : float, default=0.6
+        Opacity of the agreement-map overlay.
+    n_columns : int, default=5
+        Number of subplot columns.
+    figsize_per_subplot : float, default=3
+        Width and height allocated to each subplot in inches.
+    save_path : str or Path, optional
+        Figure output path. If omitted, the figure is displayed interactively.
     """
 
     ct_crop = scan["ct_crop"]
@@ -373,15 +430,32 @@ def show_agreement_map(
 
 
 def show_restored_consensus_mask(
-    scan,
-    slices=None,
-    alpha=0.5,
-    n_columns=5,
-    figsize_per_subplot=3,
-    save_path=None
-):
+    scan: dict[str, Any],
+    slices: Sequence[int] | np.ndarray | None = None,
+    alpha: float = 0.5,
+    n_columns: int = 5,
+    figsize_per_subplot: float = 3,
+    save_path: str | Path | None = None,
+) -> None:
     """
     Display the restored consensus mask overlaid on the original CT volume.
+
+    Parameters
+    ----------
+    scan : dict[str, Any]
+        Processed scan state containing the original CT volume and restored
+        consensus mask.
+    slices : Sequence[int] or np.ndarray, optional
+        Original-volume slice indices to display. If omitted, all slices with
+        consensus voxels are selected.
+    alpha : float, default=0.5
+        Opacity of the consensus-mask overlay.
+    n_columns : int, default=5
+        Number of subplot columns.
+    figsize_per_subplot : float, default=3
+        Width and height allocated to each subplot in inches.
+    save_path : str or Path, optional
+        Figure output path. If omitted, the figure is displayed interactively.
     """
 
     ct_volume = scan["ct_volume"]
@@ -462,15 +536,32 @@ def show_restored_consensus_mask(
 
 
 def show_consensus_mask(
-    scan,
-    slices=None,
-    alpha=0.5,
-    n_columns=5,
-    figsize_per_subplot=3,
-    save_path=None
-):
+    scan: dict[str, Any],
+    slices: Sequence[int] | np.ndarray | None = None,
+    alpha: float = 0.5,
+    n_columns: int = 5,
+    figsize_per_subplot: float = 3,
+    save_path: str | Path | None = None,
+) -> None:
     """
     Display the cropped CT slices with the consensus mask overlay.
+
+    Parameters
+    ----------
+    scan : dict[str, Any]
+        Processed scan state containing cropped CT data, the cropped consensus
+        mask, and crop origin.
+    slices : Sequence[int] or np.ndarray, optional
+        Cropped-volume slice indices to display. If omitted, all slices with
+        consensus voxels are selected.
+    alpha : float, default=0.5
+        Opacity of the consensus-mask overlay.
+    n_columns : int, default=5
+        Number of subplot columns.
+    figsize_per_subplot : float, default=3
+        Width and height allocated to each subplot in inches.
+    save_path : str or Path, optional
+        Figure output path. If omitted, the figure is displayed interactively.
     """
 
     ct_crop = scan["ct_crop"]
@@ -554,15 +645,32 @@ def show_consensus_mask(
 
 
 def show_restored_consensus_mask(
-    scan,
-    slices=None,
-    alpha=0.5,
-    n_columns=5,
-    figsize_per_subplot=3,
-    save_path=None
-):
+    scan: dict[str, Any],
+    slices: Sequence[int] | np.ndarray | None = None,
+    alpha: float = 0.5,
+    n_columns: int = 5,
+    figsize_per_subplot: float = 3,
+    save_path: str | Path | None = None,
+) -> None:
     """
     Display the restored consensus mask overlaid on the original CT volume.
+
+    Parameters
+    ----------
+    scan : dict[str, Any]
+        Processed scan state containing the original CT volume and restored
+        consensus mask.
+    slices : Sequence[int] or np.ndarray, optional
+        Original-volume slice indices to display. If omitted, all slices with
+        consensus voxels are selected.
+    alpha : float, default=0.5
+        Opacity of the consensus-mask overlay.
+    n_columns : int, default=5
+        Number of subplot columns.
+    figsize_per_subplot : float, default=3
+        Width and height allocated to each subplot in inches.
+    save_path : str or Path, optional
+        Figure output path. If omitted, the figure is displayed interactively.
     """
 
     ct_volume = scan["ct_volume"]

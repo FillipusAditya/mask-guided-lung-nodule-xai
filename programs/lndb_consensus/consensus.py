@@ -1,11 +1,26 @@
+"""Voxel-wise consensus computation for LNDb nodule annotations."""
+
 import math
+from typing import Any
 
 import numpy as np
 
 
-def stack_masks(scan):
+def stack_masks(
+    scan: dict[str, Any],
+) -> dict[str, Any]:
     """
     Stack all cropped binary masks into a single 4D array.
+
+    Parameters
+    ----------
+    scan : dict[str, Any]
+        Scan state containing a cropped mask for each radiologist.
+
+    Returns
+    -------
+    dict[str, Any]
+        Updated scan state containing the stacked radiologist masks.
     """
 
     # Stack cropped binary masks from all radiologists
@@ -20,9 +35,21 @@ def stack_masks(scan):
     }
     
 
-def compute_agreement_map(scan):
+def compute_agreement_map(
+    scan: dict[str, Any],
+) -> dict[str, Any]:
     """
     Compute the voxel-wise agreement map from the stacked binary masks.
+
+    Parameters
+    ----------
+    scan : dict[str, Any]
+        Scan state containing the stacked radiologist masks.
+
+    Returns
+    -------
+    dict[str, Any]
+        Updated scan state containing the voxel-wise annotation counts.
     """
 
     # Count how many radiologists annotated each voxel
@@ -35,7 +62,33 @@ def compute_agreement_map(scan):
 
 
 
-def create_consensus_mask(scan, clevel=0.5):
+def create_consensus_mask(
+    scan: dict[str, Any],
+    clevel: float = 0.5,
+) -> dict[str, Any]:
+    """
+    Create a binary consensus mask at the requested agreement level.
+
+    Parameters
+    ----------
+    scan : dict[str, Any]
+        Scan state containing the agreement map and radiologist annotations.
+    clevel : float, default=0.5
+        Fraction of radiologists required to include a voxel in the consensus
+        mask. The value must be in the interval ``(0, 1]``.
+
+    Returns
+    -------
+    dict[str, Any]
+        Updated scan state containing the consensus level, integer agreement
+        threshold, and binary consensus mask.
+
+    Raises
+    ------
+    ValueError
+        If ``clevel`` is outside the interval ``(0, 1]``.
+    """
+
     if not 0 < clevel <= 1:
         raise ValueError("clevel must be between 0 and 1.")
 
@@ -54,9 +107,23 @@ def create_consensus_mask(scan, clevel=0.5):
     }
 
 
-def restore_consensus_mask(scan):
+def restore_consensus_mask(
+    scan: dict[str, Any],
+) -> dict[str, Any]:
     """
     Restore the cropped consensus mask to the original CT volume size.
+
+    Parameters
+    ----------
+    scan : dict[str, Any]
+        Scan state containing the cropped consensus mask, consensus bounding
+        box, and original CT volume.
+
+    Returns
+    -------
+    dict[str, Any]
+        Updated scan state containing the full-size consensus mask and indices
+        of slices that contain consensus voxels.
     """
 
     # Create an empty mask with the same shape as the CT volume

@@ -1,9 +1,30 @@
+"""Bounding-box computation for LNDb radiologist annotations."""
+
+from typing import Any
+
 import numpy as np
 
 
-def compute_bounding_boxes(scan):
+def compute_bounding_boxes(
+    scan: dict[str, Any],
+) -> dict[str, Any]:
     """
     Compute the axis-aligned bounding box for each radiologist's binary mask.
+
+    Parameters
+    ----------
+    scan : dict[str, Any]
+        Scan state containing radiologist-specific binary nodule masks.
+
+    Returns
+    -------
+    dict[str, Any]
+        Updated scan state with a bounding box for each radiologist.
+
+    Raises
+    ------
+    ValueError
+        If a radiologist annotation contains no foreground voxel.
     """
 
     radiologists = []
@@ -47,9 +68,21 @@ def compute_bounding_boxes(scan):
     }
     
 
-def compute_consensus_bounding_box(scan):
+def compute_consensus_bounding_box(
+    scan: dict[str, Any],
+) -> dict[str, Any]:
     """
     Compute a bounding box that encloses all radiologist annotations.
+
+    Parameters
+    ----------
+    scan : dict[str, Any]
+        Scan state containing radiologist-specific bounding boxes.
+
+    Returns
+    -------
+    dict[str, Any]
+        Updated scan state containing the enclosing consensus bounding box.
     """
 
     radiologists = scan["radiologists"]

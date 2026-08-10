@@ -1,3 +1,7 @@
+"""Orchestration for the complete LNDb annotation consensus pipeline."""
+
+from typing import Any
+
 from .bbox import (
     compute_bounding_boxes,
     compute_consensus_bounding_box,
@@ -18,9 +22,30 @@ from .loader import (
 )
 
 
-def process_scan(scan, clevel=0.5):
+def process_scan(
+    scan: dict[str, Any],
+    clevel: float = 0.5,
+) -> dict[str, Any]:
     """
     Execute the complete LNDb consensus pipeline.
+
+    The pipeline loads the CT and masks, computes individual and enclosing
+    bounding boxes, crops all volumes, calculates voxel-wise agreement, creates
+    the consensus mask, and restores it to the original CT dimensions.
+
+    Parameters
+    ----------
+    scan : dict[str, Any]
+        Prepared scan metadata for one LNDb finding.
+    clevel : float, default=0.5
+        Fraction of radiologists required to include a voxel in the consensus
+        mask.
+
+    Returns
+    -------
+    dict[str, Any]
+        Fully processed scan state containing cropped and restored consensus
+        data.
     """
 
     scan = load_scan(scan)

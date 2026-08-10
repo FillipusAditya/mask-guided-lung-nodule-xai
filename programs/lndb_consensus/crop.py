@@ -1,7 +1,26 @@
-def crop_scan(scan):
+"""Volume cropping utilities for the LNDb consensus pipeline."""
+
+from typing import Any
+
+
+def crop_scan(
+    scan: dict[str, Any],
+) -> dict[str, Any]:
     """
     Crop the CT volume and all binary masks using the consensus
     bounding box while preserving the crop origin.
+
+    Parameters
+    ----------
+    scan : dict[str, Any]
+        Scan state containing the CT volume, radiologist masks, and consensus
+        bounding box.
+
+    Returns
+    -------
+    dict[str, Any]
+        Updated scan state containing cropped volumes, cropped masks, and the
+        crop origin in the original CT coordinate system.
     """
 
     bbox = scan["consensus_bbox"]

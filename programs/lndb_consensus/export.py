@@ -1,4 +1,7 @@
+"""Export CT slices, consensus masks, and visualizations for LNDb findings."""
+
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 
@@ -11,9 +14,20 @@ from .visualize import (
 )
 
 
-def save_ct_slices(scan, output_dir):
+def save_ct_slices(
+    scan: dict[str, Any],
+    output_dir: str | Path,
+) -> None:
     """
     Save CT slices containing the consensus mask.
+
+    Parameters
+    ----------
+    scan : dict[str, Any]
+        Processed scan state containing the CT volume and consensus slice
+        indices.
+    output_dir : str or Path
+        Directory where CT slices will be saved as NumPy arrays.
     """
 
     output_dir = Path(output_dir)
@@ -36,9 +50,20 @@ def save_ct_slices(scan, output_dir):
         )
 
 
-def save_consensus_slices(scan, output_dir):
+def save_consensus_slices(
+    scan: dict[str, Any],
+    output_dir: str | Path,
+) -> None:
     """
     Save consensus mask slices.
+
+    Parameters
+    ----------
+    scan : dict[str, Any]
+        Processed scan state containing the restored consensus mask and slice
+        indices.
+    output_dir : str or Path
+        Directory where consensus slices will be saved as NumPy arrays.
     """
 
     output_dir = Path(output_dir)
@@ -59,9 +84,20 @@ def save_consensus_slices(scan, output_dir):
             )
 
 
-def save_visualizations(scan, output_dir):
+def save_visualizations(
+    scan: dict[str, Any],
+    output_dir: str | Path,
+) -> None:
     """
     Save all visualization figures.
+
+    Parameters
+    ----------
+    scan : dict[str, Any]
+        Fully processed scan state containing all arrays and metadata required
+        by the visualization functions.
+    output_dir : str or Path
+        Root directory where visualization subdirectories will be created.
     """
 
     output_dir = Path(output_dir)
