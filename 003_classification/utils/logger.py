@@ -27,11 +27,23 @@ def create_training_log(
         # Write the CSV header
         writer.writerow([
             "epoch",
-            "learning_rate",
+            "epoch_time",
+            "elapsed_time_sec",
+            "is_best",
+            "early_stop_counter",
+            "gpu_memory_allocated_mb",
+            "train_time_sec",
+            "val_time_sec",
             "scheduler_updated",
             "patience_counter",
-            "early_stop_counter",
+            "best_metric",
+            "checkpoint_saved",
+            "samples_per_sec",
+            "train_batches",
+            "val_batches",
+            "gpu_memory_reserved_mb",
             "stopped_early",
+            "learning_rate",
             "train_loss",
             "train_accuracy",
             "val_loss",
@@ -47,11 +59,23 @@ def create_training_log(
 def append_training_log(
     log_path: Path,
     epoch: int,
-    learning_rate: float,
+    epoch_time: float,
+    elapsed_time_sec: float,
+    is_best: bool,
+    early_stop_counter: int,
+    gpu_memory_allocated_mb: float,
+    train_time_sec: float,
+    val_time_sec: float,
     scheduler_updated: bool,
     patience_counter: int,
-    early_stop_counter: int,
+    best_metric: float,
+    checkpoint_saved: bool,
+    samples_per_sec: float,
+    train_batches: int,
+    val_batches: int,
+    gpu_memory_reserved_mb: float,
     stopped_early: bool,
+    learning_rate: float,
     train_loss: float,
     train_accuracy: float,
     val_loss: float,
@@ -72,6 +96,36 @@ def append_training_log(
 
     epoch : int
         Current epoch number.
+
+    epoch_time : float
+        Total duration of this epoch in seconds.
+
+    elapsed_time_sec : float
+        Cumulative training duration in seconds.
+
+    is_best : bool
+        Whether this epoch produced the best model so far.
+
+    gpu_memory_allocated_mb : float
+        GPU memory allocated at the end of the epoch.
+
+    train_time_sec, val_time_sec : float
+        Durations of the training and validation phases.
+
+    best_metric : float
+        Best model-selection metric observed so far.
+
+    checkpoint_saved : bool
+        Whether the latest checkpoint was saved.
+
+    samples_per_sec : float
+        Training throughput in samples per second.
+
+    train_batches, val_batches : int
+        Numbers of training and validation batches.
+
+    gpu_memory_reserved_mb : float
+        GPU memory reserved at the end of the epoch.
 
     learning_rate : float
         Learning rate after the scheduler update.
@@ -125,11 +179,23 @@ def append_training_log(
         # Write one epoch of training results
         writer.writerow([
             epoch,
-            learning_rate,
+            epoch_time,
+            elapsed_time_sec,
+            is_best,
+            early_stop_counter,
+            gpu_memory_allocated_mb,
+            train_time_sec,
+            val_time_sec,
             scheduler_updated,
             patience_counter,
-            early_stop_counter,
+            best_metric,
+            checkpoint_saved,
+            samples_per_sec,
+            train_batches,
+            val_batches,
+            gpu_memory_reserved_mb,
             stopped_early,
+            learning_rate,
             train_loss,
             train_accuracy,
             val_loss,

@@ -10,6 +10,16 @@ from .checkpoint import (
 )
 
 #---------------------------------
+# DATA
+#---------------------------------
+from .dataloader import (
+    create_dataloader,
+)
+from .dataset import (
+    LungClassificationDataset,
+)
+
+#---------------------------------
 # EARLY STOPPING
 #---------------------------------
 from .early_stopping import (

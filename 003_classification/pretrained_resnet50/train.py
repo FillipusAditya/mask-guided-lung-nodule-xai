@@ -3,12 +3,15 @@
 from collections import Counter
 from datetime import datetime
 from pathlib import Path
+import time
 
+import albumentations as A
 import pandas as pd
 import torch
 import torch.nn as nn
+from albumentations.pytorch import ToTensorV2
 from torch.utils.data import DataLoader
-from torchvision import datasets, models
+from torchvision import models
 from torchvision.models import ResNet50_Weights
 from tqdm import tqdm
 
@@ -17,6 +20,7 @@ from classification.utils import (
     append_training_log,
     compute_auc,
     compute_classification_metrics,
+    create_dataloader,
     create_training_log,
     plot_accuracy_curve,
     plot_confusion_matrix,
@@ -88,19 +92,25 @@ FIGURES_DIR.mkdir(
 #---------------------------------
 # DATASET
 #---------------------------------
-TRAIN_DIR = (
+DATASET_ROOT = (
     PROJECT_ROOT
     / "dataset"
-    / "_hymenoptera_dataset"
-    / "train"
+    / "_segmentation_dataset"
 )
 
-VAL_DIR = (
-    PROJECT_ROOT
-    / "dataset"
-    / "_hymenoptera_dataset"
-    / "val"
-)
+INPUT_HEIGHT = 224
+INPUT_WIDTH = 224
+
+TRAIN_SPLIT = "train"
+VAL_SPLIT = "val"
+
+CLASS_TO_IDX = {
+    "benign": 0,
+    "malignant": 1,
+}
+
+IMAGENET_MEAN = (0.485, 0.456, 0.406)
+IMAGENET_STD = (0.229, 0.224, 0.225)
 
 TRAIN_SHUFFLE = True
 VAL_SHUFFLE = False
@@ -119,6 +129,8 @@ TRAINING_STRATEGY = "feature_extraction"
 #---------------------------------
 
 NUM_WORKERS = 4
+PERSISTENT_WORKERS = True
+PREFETCH_FACTOR = 2
 PIN_MEMORY = torch.cuda.is_available()
 
 SEED = 42
@@ -131,22 +143,40 @@ NUM_EPOCHS = 5
 
 WEIGHT_DECAY_OPTM = 1e-4
 
-SCHEDULER_MODE = "min"
+MONITOR_TO_METRIC_KEY = {
+    "val_loss": "loss",
+    "accuracy": "accuracy",
+    "precision": "precision",
+    "sensitivity": "sensitivity",
+    "specificity": "specificity",
+    "f1_score": "f1_score",
+}
+
+MONITOR_TO_MODE = {
+    "val_loss": "min",
+    "accuracy": "max",
+    "precision": "max",
+    "sensitivity": "max",
+    "specificity": "max",
+    "f1_score": "max",
+}
+
+SCHEDULER_MONITOR = "val_loss"
+SCHEDULER_MODE = MONITOR_TO_MODE[SCHEDULER_MONITOR]
 SCHEDULER_FACTOR = 0.5
 SCHEDULER_PATIENCE = 5
 SCHEDULER_THRESHOLD = 1e-3
 SCHEDULER_THRESHOLD_MODE = "rel"
 SCHEDULER_COOLDOWN = 1
 SCHEDULER_MIN_LR = 1e-6
-SCHEDULER_MONITOR = "val_loss"
 
 STOPPING_PATIENCE = 20
-STOPPING_MODE = "min"
 STOPPING_MIN_DELTA = 0.0
 EARLY_STOPPING_MONITOR = "val_loss"
+STOPPING_MODE = MONITOR_TO_MODE[EARLY_STOPPING_MONITOR]
 
 BEST_MODEL_MONITOR = "val_loss"
-BEST_MODEL_MODE = "min"
+BEST_MODEL_MODE = MONITOR_TO_MODE[BEST_MODEL_MONITOR]
 SAVE_LATEST_CHECKPOINT = True
 
 #---------------------------------
@@ -169,7 +199,7 @@ def train_one_epoch(
     optimizer: torch.optim.Optimizer,
     criterion: nn.Module,
     device: torch.device,
-) -> tuple[float, float]:
+) -> tuple[float, float, int]:
     """
     Train the classification model for one epoch.
 
@@ -196,8 +226,9 @@ def train_one_epoch(
 
     Returns
     -------
-    tuple[float, float]
-        Average training loss and classification accuracy for the epoch.
+    tuple[float, float, int]
+        Average training loss, classification accuracy, and number of samples
+        processed during the epoch.
     """
 
     # Enable training mode
@@ -220,8 +251,8 @@ def train_one_epoch(
     for images, labels in progress_bar:
 
         # Move the mini-batch to the selected device
-        images = images.to(device)
-        labels = labels.to(device)
+        images = images.to(device, non_blocking=PIN_MEMORY)
+        labels = labels.to(device, non_blocking=PIN_MEMORY)
 
         # Clear gradients from the previous iteration
         optimizer.zero_grad(set_to_none=True)
@@ -266,6 +297,7 @@ def train_one_epoch(
     return (
         train_loss,
         train_accuracy,
+        total_samples,
     )
 
 
@@ -340,8 +372,8 @@ def validate_one_epoch(
         for images, labels in progress_bar:
 
             # Move the mini-batch to the selected device
-            images = images.to(device)
-            labels = labels.to(device)
+            images = images.to(device, non_blocking=PIN_MEMORY)
+            labels = labels.to(device, non_blocking=PIN_MEMORY)
 
             # Perform the forward pass
             outputs = model(images)
@@ -416,17 +448,64 @@ def main() -> None:
     # PREPARE DATASET & DATA LOADER
     #---------------------------------
 
-    preprocess = WEIGHTS.transforms()
+    train_transforms = A.Compose([
+        A.Resize(height=INPUT_HEIGHT, width=INPUT_WIDTH),
+        A.HorizontalFlip(p=0.5),
+        A.Rotate(limit=15, border_mode=0, p=0.5),
+        A.RandomBrightnessContrast(
+            brightness_limit=0.10,
+            contrast_limit=0.10,
+            p=0.3,
+        ),
+        A.GaussNoise(std_range=(0.01, 0.03), p=0.2),
+        A.Normalize(
+            mean=IMAGENET_MEAN,
+            std=IMAGENET_STD,
+            max_pixel_value=1.0,
+        ),
+        ToTensorV2(),
+    ])
 
-    train_dataset = datasets.ImageFolder(
-        root=TRAIN_DIR,
-        transform=preprocess
+    val_transforms = A.Compose([
+        A.Resize(height=INPUT_HEIGHT, width=INPUT_WIDTH),
+        A.Normalize(
+            mean=IMAGENET_MEAN,
+            std=IMAGENET_STD,
+            max_pixel_value=1.0,
+        ),
+        ToTensorV2(),
+    ])
+
+    train_loader = create_dataloader(
+        root_dir=DATASET_ROOT,
+        split=TRAIN_SPLIT,
+        transform=train_transforms,
+        class_to_idx=CLASS_TO_IDX,
+        batch_size=BATCH_SIZE,
+        shuffle=TRAIN_SHUFFLE,
+        num_workers=NUM_WORKERS,
+        pin_memory=PIN_MEMORY,
+        persistent_workers=PERSISTENT_WORKERS,
+        prefetch_factor=PREFETCH_FACTOR,
+        drop_last=TRAIN_DROP_LAST,
     )
 
-    val_dataset = datasets.ImageFolder(
-        root=VAL_DIR,
-        transform=preprocess
+    val_loader = create_dataloader(
+        root_dir=DATASET_ROOT,
+        split=VAL_SPLIT,
+        transform=val_transforms,
+        class_to_idx=CLASS_TO_IDX,
+        batch_size=BATCH_SIZE,
+        shuffle=VAL_SHUFFLE,
+        num_workers=NUM_WORKERS,
+        pin_memory=PIN_MEMORY,
+        persistent_workers=PERSISTENT_WORKERS,
+        prefetch_factor=PREFETCH_FACTOR,
+        drop_last=VAL_DROP_LAST,
     )
+
+    train_dataset = train_loader.dataset
+    val_dataset = val_loader.dataset
 
     if train_dataset.class_to_idx != val_dataset.class_to_idx:
         raise ValueError(
@@ -435,24 +514,6 @@ def main() -> None:
             f"Validation: {val_dataset.class_to_idx}"
         )
 
-    train_loader = DataLoader(
-        dataset=train_dataset,
-        batch_size=BATCH_SIZE,
-        shuffle=TRAIN_SHUFFLE,
-        drop_last=TRAIN_DROP_LAST,
-        num_workers=NUM_WORKERS,
-        pin_memory=PIN_MEMORY,
-    )
-
-    val_loader = DataLoader(
-        dataset=val_dataset,
-        batch_size=BATCH_SIZE,
-        shuffle=VAL_SHUFFLE,
-        drop_last=VAL_DROP_LAST,
-        num_workers=NUM_WORKERS,
-        pin_memory=PIN_MEMORY,
-    )
-    
     #---------------------------------
     # PREPARE MODEL
     #---------------------------------
@@ -499,7 +560,11 @@ def main() -> None:
 
     criterion = nn.CrossEntropyLoss()
 
-    best_val_loss = float("inf")
+    best_metric = (
+        float("-inf")
+        if BEST_MODEL_MODE == "max"
+        else float("inf")
+    )
 
     optimizer_parameters = optimizer.param_groups[0]
 
@@ -536,8 +601,14 @@ def main() -> None:
             ),
         },
         "data": {
-            "train_directory": str(TRAIN_DIR),
-            "val_directory": str(VAL_DIR),
+            "dataset_root": str(DATASET_ROOT),
+            "metadata_path": str(DATASET_ROOT / "split_metadata.csv"),
+            "ct_directory": str(DATASET_ROOT / "ct"),
+            "image_height": INPUT_HEIGHT,
+            "image_width": INPUT_WIDTH,
+            "input_channels": 3,
+            "train_split": TRAIN_SPLIT,
+            "val_split": VAL_SPLIT,
             "train_samples": len(train_dataset),
             "val_samples": len(val_dataset),
             "train_batches": len(train_loader),
@@ -555,7 +626,10 @@ def main() -> None:
                 for class_name, class_index
                 in val_dataset.class_to_idx.items()
             },
-            "preprocessing": str(preprocess),
+            "train_transforms": str(train_transforms),
+            "val_transforms": str(val_transforms),
+            "normalization_mean": IMAGENET_MEAN,
+            "normalization_std": IMAGENET_STD,
         },
         "training": {
             "batch_size": BATCH_SIZE,
@@ -566,6 +640,8 @@ def main() -> None:
             "name": criterion.__class__.__name__,
         },
         "metrics": {
+            "monitor_to_metric_key": MONITOR_TO_METRIC_KEY,
+            "monitor_to_mode": MONITOR_TO_MODE,
             "names": [
                 "confusion_matrix",
                 "accuracy",
@@ -625,6 +701,8 @@ def main() -> None:
         "dataloader": {
             "num_workers": NUM_WORKERS,
             "pin_memory": PIN_MEMORY,
+            "persistent_workers": PERSISTENT_WORKERS,
+            "prefetch_factor": PREFETCH_FACTOR,
             "train_shuffle": TRAIN_SHUFFLE,
             "val_shuffle": VAL_SHUFFLE,
             "train_drop_last": TRAIN_DROP_LAST,
@@ -645,13 +723,19 @@ def main() -> None:
         config=training_config,
         save_path=TRAINING_CONFIG_PATH,
     )
+
+    training_start_time = time.perf_counter()
     
     #---------------------------------
     # TRAINING
     #---------------------------------
     for epoch in range(NUM_EPOCHS):
+        if DEVICE.type == "cuda":
+            torch.cuda.synchronize()
+        epoch_start_time = time.perf_counter()
+
         # Training One Epoch
-        train_loss, train_accuracy = train_one_epoch(
+        train_loss, train_accuracy, train_total_samples = train_one_epoch(
             epoch=epoch,
             num_epochs=NUM_EPOCHS,
             model=model,
@@ -660,8 +744,12 @@ def main() -> None:
             criterion=criterion,
             device=DEVICE
         )
+        if DEVICE.type == "cuda":
+            torch.cuda.synchronize()
+        train_time_sec = time.perf_counter() - epoch_start_time
         
         # Validation One Epoch
+        val_start_time = time.perf_counter()
         (
             val_metrics,
             val_confusion_matrix,
@@ -676,29 +764,42 @@ def main() -> None:
             device=DEVICE,
             num_classes=num_classes,
         )
-
-        validation_metrics = {
-            "val_loss": val_metrics["loss"],
-            "val_accuracy": val_metrics["accuracy"],
-        }
+        if DEVICE.type == "cuda":
+            torch.cuda.synchronize()
+        val_time_sec = time.perf_counter() - val_start_time
 
         # Apply learning rate scheduler
         previous_lr = optimizer.param_groups[0]["lr"]
-        scheduler.step(validation_metrics[SCHEDULER_MONITOR])
+        scheduler.step(
+            val_metrics[
+                MONITOR_TO_METRIC_KEY[SCHEDULER_MONITOR]
+            ]
+        )
         current_lr = optimizer.param_groups[0]["lr"]
         scheduler_updated = current_lr != previous_lr
         patience_counter = scheduler.num_bad_epochs
 
         # Update early-stopping state before logging and checkpointing
         stop = early_stopping(
-            metric=validation_metrics[EARLY_STOPPING_MONITOR],
+            metric=val_metrics[
+                MONITOR_TO_METRIC_KEY[EARLY_STOPPING_MONITOR]
+            ],
             epoch=epoch + 1,
         )
         early_stop_counter = early_stopping.counter
         
         # Save Best Model
-        if val_metrics["loss"] < best_val_loss:
-            best_val_loss = val_metrics["loss"]
+        current_best_metric = val_metrics[
+            MONITOR_TO_METRIC_KEY[BEST_MODEL_MONITOR]
+        ]
+        is_best = (
+            current_best_metric > best_metric
+            if BEST_MODEL_MODE == "max"
+            else current_best_metric < best_metric
+        )
+
+        if is_best:
+            best_metric = current_best_metric
                     
             save_best_model(
                 model=model,
@@ -707,42 +808,74 @@ def main() -> None:
             
             print(
                 f"Best model updated "
-                f"(Validation Loss: {val_metrics['loss']:.4f})"
+                f"({BEST_MODEL_MONITOR}: {current_best_metric:.4f})"
             )
         
         # Save Checkpoint
-        save_checkpoint(
-            model=model,
-            optimizer=optimizer,
-            scheduler=scheduler,
-            early_stopping=early_stopping,
-            epoch=epoch + 1,
-            train_loss=train_loss,
-            train_accuracy=train_accuracy,
-            val_loss=val_metrics["loss"],
-            val_accuracy=val_metrics["accuracy"],
-            sensitivity=val_metrics["sensitivity"],
-            specificity=val_metrics["specificity"],
-            precision=val_metrics["precision"],
-            f1_score=val_metrics["f1_score"],
-            auc_score=val_metrics["auc"],
-            best_val_loss=best_val_loss,
-            num_classes=num_classes,
-            learning_rate=current_lr,
-            batch_size=BATCH_SIZE,
-            save_path=CHECKPOINT_PATH,
-            architecture=MODEL_ARCHITECTURE,
+        checkpoint_saved = False
+        if SAVE_LATEST_CHECKPOINT:
+            save_checkpoint(
+                model=model,
+                optimizer=optimizer,
+                scheduler=scheduler,
+                early_stopping=early_stopping,
+                epoch=epoch + 1,
+                train_loss=train_loss,
+                train_accuracy=train_accuracy,
+                val_loss=val_metrics["loss"],
+                val_accuracy=val_metrics["accuracy"],
+                sensitivity=val_metrics["sensitivity"],
+                specificity=val_metrics["specificity"],
+                precision=val_metrics["precision"],
+                f1_score=val_metrics["f1_score"],
+                auc_score=val_metrics["auc"],
+                best_metric=best_metric,
+                best_metric_name=BEST_MODEL_MONITOR,
+                best_metric_mode=BEST_MODEL_MODE,
+                num_classes=num_classes,
+                learning_rate=current_lr,
+                batch_size=BATCH_SIZE,
+                save_path=CHECKPOINT_PATH,
+                architecture=MODEL_ARCHITECTURE,
+            )
+            checkpoint_saved = True
+
+        epoch_time = time.perf_counter() - epoch_start_time
+        elapsed_time_sec = time.perf_counter() - training_start_time
+        gpu_memory_allocated_mb = (
+            torch.cuda.memory_allocated(DEVICE) / (1024 ** 2)
+            if DEVICE.type == "cuda" else 0.0
+        )
+        gpu_memory_reserved_mb = (
+            torch.cuda.memory_reserved(DEVICE) / (1024 ** 2)
+            if DEVICE.type == "cuda" else 0.0
+        )
+        samples_per_sec = (
+            train_total_samples / train_time_sec
+            if train_time_sec > 0.0 else 0.0
         )
         
         # Write Training Log
         append_training_log(
             log_path=TRAINING_LOG_PATH,
             epoch=epoch + 1,
-            learning_rate=current_lr,
+            epoch_time=epoch_time,
+            elapsed_time_sec=elapsed_time_sec,
+            is_best=is_best,
+            early_stop_counter=early_stop_counter,
+            gpu_memory_allocated_mb=gpu_memory_allocated_mb,
+            train_time_sec=train_time_sec,
+            val_time_sec=val_time_sec,
             scheduler_updated=scheduler_updated,
             patience_counter=patience_counter,
-            early_stop_counter=early_stop_counter,
+            best_metric=best_metric,
+            checkpoint_saved=checkpoint_saved,
+            samples_per_sec=samples_per_sec,
+            train_batches=len(train_loader),
+            val_batches=len(val_loader),
+            gpu_memory_reserved_mb=gpu_memory_reserved_mb,
             stopped_early=stop,
+            learning_rate=current_lr,
             train_loss=train_loss,
             train_accuracy=train_accuracy,
             val_loss=val_metrics["loss"],

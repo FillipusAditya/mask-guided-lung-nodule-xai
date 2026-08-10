@@ -50,7 +50,9 @@ def save_checkpoint(
     precision: float,
     f1_score: float,
     auc_score: float,
-    best_val_loss: float,
+    best_metric: float,
+    best_metric_name: str,
+    best_metric_mode: str,
     num_classes: int,
     learning_rate: float,
     batch_size: int,
@@ -108,8 +110,14 @@ def save_checkpoint(
     auc_score : float
         Validation ROC AUC.
 
-    best_val_loss : float
-        Best validation loss observed so far.
+    best_metric : float
+        Best model-selection metric observed so far.
+
+    best_metric_name : str
+        Name of the metric used to select the best model.
+
+    best_metric_mode : str
+        Optimization direction, either ``"min"`` or ``"max"``.
 
     num_classes : int
         Number of output classes.
@@ -148,7 +156,9 @@ def save_checkpoint(
             "precision": precision,
             "f1_score": f1_score,
             "auc": auc_score,
-            "best_val_loss": best_val_loss,
+            "best_metric": best_metric,
+            "best_metric_name": best_metric_name,
+            "best_metric_mode": best_metric_mode,
         },
         save_path,
     )
