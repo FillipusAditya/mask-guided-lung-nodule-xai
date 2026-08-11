@@ -8,7 +8,7 @@ from tqdm import tqdm
 
 
 # Root directory of the project.
-PROJECT_ROOT = Path(__file__).resolve().parents[3]
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 # Metadata containing the selected nodule clusters
 METADATA_CSV_PATH = (

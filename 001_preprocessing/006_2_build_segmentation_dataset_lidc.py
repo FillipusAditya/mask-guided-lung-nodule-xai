@@ -6,7 +6,7 @@ from tqdm import tqdm
 
 
 # Root directory of the project.
-PROJECT_ROOT = Path(__file__).resolve().parents[3]
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 # Directory containing CT volumes (.npy).
 CT_VOLUME_DIR = (
