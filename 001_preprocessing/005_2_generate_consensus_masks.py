@@ -1,9 +1,17 @@
 from pathlib import Path
+import sys
 
 import pandas as pd
 from tqdm import tqdm
 
-from programs.lndb_consensus import (
+
+# Make packages inside 001_preprocessing importable without installation.
+PREPROCESSING_DIR = Path(__file__).resolve().parent
+
+if str(PREPROCESSING_DIR) not in sys.path:
+    sys.path.insert(0, str(PREPROCESSING_DIR))
+
+from lndb_consensus import (
     prepare_scan_data,
     process_scan,
     save_consensus_slices,
@@ -11,7 +19,7 @@ from programs.lndb_consensus import (
 
 
 # Root directory of the project
-PROJECT_ROOT = Path(__file__).resolve().parents[3]
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 # Directory of ct.mhd
 DATA_DIR = PROJECT_ROOT / "dataset" / "lndb" / "data"
