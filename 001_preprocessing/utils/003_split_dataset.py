@@ -1,6 +1,8 @@
 """Label prepared samples and create patient-level dataset splits."""
 
 from pathlib import Path
+from datetime import datetime, timezone
+import json
 import re
 from typing import Sequence
 
@@ -35,6 +37,7 @@ LNDB_LABEL_CSV = (
 
 LABELED_METADATA_CSV = DATASET_DIR / "labeled_metadata.csv"
 SPLIT_METADATA_CSV = DATASET_DIR / "split_metadata.csv"
+ERROR_LOG_JSON = DATASET_DIR / "split_metadata_errors.json"
 
 TRAIN_RATIO = 0.70
 VAL_RATIO = 0.15
@@ -66,6 +69,45 @@ LABELED_METADATA_COLUMNS = [
     "mask_path",
     "label",
 ]
+
+
+def record_error(
+    errors: list[dict[str, object]],
+    stage: str,
+    error: Exception,
+    **context: object,
+) -> None:
+    """Append one structured error record without stopping the pipeline."""
+
+    errors.append(
+        {
+            "stage": stage,
+            **context,
+            "error_type": type(error).__name__,
+            "message": str(error),
+        }
+    )
+
+
+def save_error_log(
+    errors: list[dict[str, object]],
+    status: str,
+    processed_samples: int = 0,
+    saved_samples: int = 0,
+) -> None:
+    """Save a JSON report for skipped samples and fatal pipeline errors."""
+
+    ERROR_LOG_JSON.parent.mkdir(parents=True, exist_ok=True)
+    report = {
+        "generated_at_utc": datetime.now(timezone.utc).isoformat(),
+        "status": status,
+        "processed_samples": processed_samples,
+        "saved_samples": saved_samples,
+        "error_count": len(errors),
+        "errors": errors,
+    }
+    with ERROR_LOG_JSON.open("w", encoding="utf-8") as file:
+        json.dump(report, file, indent=2, ensure_ascii=False)
 
 
 def validate_split_ratios(
@@ -186,6 +228,7 @@ def add_unique_label(
 
 def build_lndb_label_lookup(
     metadata_csv: str | Path,
+    errors: list[dict[str, object]] | None = None,
 ) -> dict[tuple[int, int, int], str]:
     """Build ``(lndbid, finding_id, slice_index) -> label`` mappings."""
 
@@ -202,25 +245,36 @@ def build_lndb_label_lookup(
             f"LNDb label CSV is missing columns: {sorted(missing_columns)}"
         )
 
+    errors = errors if errors is not None else []
     lookup: dict[tuple[int, int, int], str] = {}
     for row_index, row in metadata_df.iterrows():
         context = f"LNDb metadata row {row_index}"
-        lndbid = integer_value(row["lndbid"], "lndbid", context)
-        finding_id = integer_value(row["findingid"], "findingid", context)
-        label = normalize_label(row["label"], context)
-        slice_indices = parse_slice_list(
-            row["consensus_slice_list"],
-            "consensus_slice_list",
-        )
+        try:
+            lndbid = integer_value(row["lndbid"], "lndbid", context)
+            finding_id = integer_value(row["findingid"], "findingid", context)
+            label = normalize_label(row["label"], context)
+            slice_indices = parse_slice_list(
+                row["consensus_slice_list"],
+                "consensus_slice_list",
+            )
 
-        for slice_index in slice_indices:
-            key = (lndbid, finding_id, slice_index)
-            add_unique_label(lookup, key, label, str(key))
+            for slice_index in slice_indices:
+                key = (lndbid, finding_id, slice_index)
+                add_unique_label(lookup, key, label, str(key))
+        except Exception as error:
+            record_error(
+                errors,
+                "build_lndb_label_lookup",
+                error,
+                source_csv=str(metadata_csv),
+                row_index=int(row_index),
+            )
     return lookup
 
 
 def build_lidc_label_lookup(
     metadata_csv: str | Path,
+    errors: list[dict[str, object]] | None = None,
 ) -> dict[tuple[str, str, str, int, int], str]:
     """Build LIDC scan, cluster, and slice label mappings."""
 
@@ -242,35 +296,49 @@ def build_lidc_label_lookup(
             f"LIDC-IDRI label CSV is missing columns: {sorted(missing_columns)}"
         )
 
+    errors = errors if errors is not None else []
     lookup: dict[tuple[str, str, str, int, int], str] = {}
     for row_index, row in metadata_df.iterrows():
         context = f"LIDC-IDRI metadata row {row_index}"
-        patient_id = str(row["patient_id"]).strip()
-        if not re.fullmatch(r"LIDC-IDRI-\d+", patient_id):
-            raise ValueError(f"Invalid patient_id for {context}: {patient_id}")
+        try:
+            patient_id = str(row["patient_id"]).strip()
+            if not re.fullmatch(r"LIDC-IDRI-\d+", patient_id):
+                raise ValueError(
+                    f"Invalid patient_id for {context}: {patient_id}"
+                )
 
-        study_suffix = uid_suffix(
-            row["study_instance_uid"], "study_instance_uid", context
-        )
-        series_suffix = uid_suffix(
-            row["series_instance_uid"], "series_instance_uid", context
-        )
-        cluster_id = integer_value(row["cluster_id"], "cluster_id", context)
-        label = normalize_label(row["label"], context)
-        slice_indices = parse_slice_list(
-            row["consensus_mask_slice_list"],
-            "consensus_mask_slice_list",
-        )
-
-        for slice_index in slice_indices:
-            key = (
-                patient_id,
-                study_suffix,
-                series_suffix,
-                cluster_id,
-                slice_index,
+            study_suffix = uid_suffix(
+                row["study_instance_uid"], "study_instance_uid", context
             )
-            add_unique_label(lookup, key, label, str(key))
+            series_suffix = uid_suffix(
+                row["series_instance_uid"], "series_instance_uid", context
+            )
+            cluster_id = integer_value(
+                row["cluster_id"], "cluster_id", context
+            )
+            label = normalize_label(row["label"], context)
+            slice_indices = parse_slice_list(
+                row["consensus_mask_slice_list"],
+                "consensus_mask_slice_list",
+            )
+
+            for slice_index in slice_indices:
+                key = (
+                    patient_id,
+                    study_suffix,
+                    series_suffix,
+                    cluster_id,
+                    slice_index,
+                )
+                add_unique_label(lookup, key, label, str(key))
+        except Exception as error:
+            record_error(
+                errors,
+                "build_lidc_label_lookup",
+                error,
+                source_csv=str(metadata_csv),
+                row_index=int(row_index),
+            )
     return lookup
 
 
@@ -306,10 +374,10 @@ def parse_sample_filename(filename: str) -> dict[str, object]:
     raise ValueError(f"Unsupported sample filename: {filename}")
 
 
-def collect_aligned_filenames(
+def collect_candidate_filenames(
     data_directories: dict[str, Path],
 ) -> list[str]:
-    """Return filenames present in every configured data directory."""
+    """Return the union of filenames found in configured data directories."""
 
     filename_sets: dict[str, set[str]] = {}
     for column_name, directory in data_directories.items():
@@ -328,31 +396,9 @@ def collect_aligned_filenames(
             for path in directory.glob("*.npy")
             if path.is_file()
         }
-        if not filenames:
-            raise FileNotFoundError(
-                f"No .npy files found for {column_name}: {directory}"
-            )
         filename_sets[column_name] = filenames
 
-    reference_column = next(iter(data_directories))
-    reference_filenames = filename_sets[reference_column]
-    alignment_errors: list[str] = []
-    for column_name, filenames in filename_sets.items():
-        missing = sorted(reference_filenames - filenames)
-        unexpected = sorted(filenames - reference_filenames)
-        if missing or unexpected:
-            alignment_errors.append(
-                f"{column_name}: missing {len(missing)} "
-                f"(examples: {missing[:5]}), unexpected {len(unexpected)} "
-                f"(examples: {unexpected[:5]})"
-            )
-
-    if alignment_errors:
-        raise RuntimeError(
-            "Dataset directories do not contain identical .npy filenames. "
-            + " | ".join(alignment_errors)
-        )
-    return sorted(reference_filenames)
+    return sorted(set().union(*filename_sets.values()))
 
 
 def build_labeled_metadata(
@@ -361,45 +407,64 @@ def build_labeled_metadata(
     lndb_label_lookup: dict[tuple[int, int, int], str],
     lidc_label_lookup: dict[tuple[str, str, str, int, int], str],
     dataset_dir: str | Path = DATASET_DIR,
+    errors: list[dict[str, object]] | None = None,
 ) -> pd.DataFrame:
     """Build path and classification-label metadata for prepared samples."""
 
     dataset_dir = Path(dataset_dir)
+    errors = errors if errors is not None else []
     records: list[dict[str, str]] = []
     for filename in tqdm(
         filenames,
         desc="Labeling dataset samples",
         unit="file",
     ):
-        sample = parse_sample_filename(filename)
-        dataset_name = str(sample["dataset"])
-        label_key = sample["label_key"]
-        label = (
-            lndb_label_lookup.get(label_key)
-            if dataset_name == LNDB_DATASET_NAME
-            else lidc_label_lookup.get(label_key)
-        )
-        if label is None:
-            raise KeyError(
-                f"No classification label found for {filename} "
-                f"using key {label_key}."
-            )
+        try:
+            missing_paths = [
+                str(Path(directory) / filename)
+                for directory in data_directories.values()
+                if not (Path(directory) / filename).is_file()
+            ]
+            if missing_paths:
+                raise FileNotFoundError(
+                    f"Missing paired sample files: {missing_paths}"
+                )
 
-        record = {
-            "dataset": dataset_name,
-            "patient_id": str(sample["patient_id"]),
-            "filename": filename,
-        }
-        for column_name, directory in data_directories.items():
-            record[column_name] = (
-                Path(directory) / filename
-            ).relative_to(dataset_dir).as_posix()
-        record["label"] = label
-        records.append(record)
+            sample = parse_sample_filename(filename)
+            dataset_name = str(sample["dataset"])
+            label_key = sample["label_key"]
+            label = (
+                lndb_label_lookup.get(label_key)
+                if dataset_name == LNDB_DATASET_NAME
+                else lidc_label_lookup.get(label_key)
+            )
+            if label is None:
+                raise KeyError(
+                    f"No classification label found using key {label_key}."
+                )
+
+            record = {
+                "dataset": dataset_name,
+                "patient_id": str(sample["patient_id"]),
+                "filename": filename,
+            }
+            for column_name, directory in data_directories.items():
+                record[column_name] = (
+                    Path(directory) / filename
+                ).relative_to(dataset_dir).as_posix()
+            record["label"] = label
+            records.append(record)
+        except Exception as error:
+            record_error(
+                errors,
+                "build_labeled_metadata",
+                error,
+                filename=filename,
+            )
 
     metadata_df = pd.DataFrame(records, columns=LABELED_METADATA_COLUMNS)
     if metadata_df.empty:
-        raise ValueError("Cannot build metadata from an empty filename list.")
+        return metadata_df
     return metadata_df.sort_values(
         by=["dataset", "patient_id", "filename"],
         kind="stable",
@@ -591,54 +656,87 @@ def print_summary(
 def main() -> None:
     """Build labeled metadata first, then generate patient-level splits."""
 
-    validate_split_ratios(TRAIN_RATIO, VAL_RATIO, TEST_RATIO)
-    filenames = collect_aligned_filenames(DATA_DIRECTORIES)
-    lndb_label_lookup = build_lndb_label_lookup(LNDB_LABEL_CSV)
-    lidc_label_lookup = build_lidc_label_lookup(LIDC_LABEL_CSV)
+    errors: list[dict[str, object]] = []
+    processed_samples = 0
+    saved_samples = 0
+    status = "failed"
 
-    labeled_metadata_df = build_labeled_metadata(
-        filenames,
-        DATA_DIRECTORIES,
-        lndb_label_lookup,
-        lidc_label_lookup,
-    )
-    save_metadata(labeled_metadata_df, LABELED_METADATA_CSV)
+    try:
+        validate_split_ratios(TRAIN_RATIO, VAL_RATIO, TEST_RATIO)
+        filenames = collect_candidate_filenames(DATA_DIRECTORIES)
+        processed_samples = len(filenames)
+        lndb_label_lookup = build_lndb_label_lookup(
+            LNDB_LABEL_CSV,
+            errors=errors,
+        )
+        lidc_label_lookup = build_lidc_label_lookup(
+            LIDC_LABEL_CSV,
+            errors=errors,
+        )
 
-    lidc_patients = select_patients_by_dataset(
-        labeled_metadata_df, LIDC_DATASET_NAME
-    )
-    lndb_patients = select_patients_by_dataset(
-        labeled_metadata_df, LNDB_DATASET_NAME
-    )
-    if not lidc_patients:
-        raise RuntimeError("No labeled LIDC-IDRI patients were found.")
-    if not lndb_patients:
-        raise RuntimeError("No labeled LNDb patients were found.")
+        labeled_metadata_df = build_labeled_metadata(
+            filenames,
+            DATA_DIRECTORIES,
+            lndb_label_lookup,
+            lidc_label_lookup,
+            errors=errors,
+        )
+        saved_samples = len(labeled_metadata_df)
+        if labeled_metadata_df.empty:
+            raise RuntimeError(
+                "No valid labeled samples remain after error filtering."
+            )
+        save_metadata(labeled_metadata_df, LABELED_METADATA_CSV)
 
-    patient_splits = {
-        LIDC_DATASET_NAME: split_patients(lidc_patients),
-        LNDB_DATASET_NAME: split_patients(lndb_patients),
-    }
-    lidc_train, lidc_val, lidc_test = patient_splits[LIDC_DATASET_NAME]
-    lndb_train, lndb_val, lndb_test = patient_splits[LNDB_DATASET_NAME]
-    train_ids = lidc_train | lndb_train
-    val_ids = lidc_val | lndb_val
-    test_ids = lidc_test | lndb_test
+        lidc_patients = select_patients_by_dataset(
+            labeled_metadata_df, LIDC_DATASET_NAME
+        )
+        lndb_patients = select_patients_by_dataset(
+            labeled_metadata_df, LNDB_DATASET_NAME
+        )
+        if not lidc_patients:
+            raise RuntimeError("No labeled LIDC-IDRI patients were found.")
+        if not lndb_patients:
+            raise RuntimeError("No labeled LNDb patients were found.")
 
-    validate_split_membership(
-        train_ids,
-        val_ids,
-        test_ids,
-        expected_ids=set(labeled_metadata_df["patient_id"]),
-    )
-    split_metadata_df = add_split_assignments(
-        labeled_metadata_df,
-        train_ids,
-        val_ids,
-        test_ids,
-    )
-    save_metadata(split_metadata_df, SPLIT_METADATA_CSV)
-    print_summary(split_metadata_df, patient_splits)
+        patient_splits = {
+            LIDC_DATASET_NAME: split_patients(lidc_patients),
+            LNDB_DATASET_NAME: split_patients(lndb_patients),
+        }
+        lidc_train, lidc_val, lidc_test = patient_splits[LIDC_DATASET_NAME]
+        lndb_train, lndb_val, lndb_test = patient_splits[LNDB_DATASET_NAME]
+        train_ids = lidc_train | lndb_train
+        val_ids = lidc_val | lndb_val
+        test_ids = lidc_test | lndb_test
+
+        validate_split_membership(
+            train_ids,
+            val_ids,
+            test_ids,
+            expected_ids=set(labeled_metadata_df["patient_id"]),
+        )
+        split_metadata_df = add_split_assignments(
+            labeled_metadata_df,
+            train_ids,
+            val_ids,
+            test_ids,
+        )
+        save_metadata(split_metadata_df, SPLIT_METADATA_CSV)
+        print_summary(split_metadata_df, patient_splits)
+        status = "completed_with_errors" if errors else "completed"
+    except Exception as error:
+        record_error(errors, "main", error)
+        print()
+        print(f"Pipeline could not continue: {error}")
+    finally:
+        save_error_log(
+            errors,
+            status=status,
+            processed_samples=processed_samples,
+            saved_samples=saved_samples,
+        )
+        print(f"Error log      : {ERROR_LOG_JSON}")
+        print(f"Logged errors  : {len(errors)}")
 
 
 if __name__ == "__main__":
