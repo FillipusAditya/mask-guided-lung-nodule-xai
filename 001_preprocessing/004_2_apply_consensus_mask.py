@@ -223,7 +223,7 @@ def process_study(
     ct_input_dir: str | Path,
     output_dir: str | Path,
     overwrite: bool = False,
-) -> dict[str, int]:
+) -> dict[str, int | list[Path]]:
     """Process every nodule directory and mask belonging to one study."""
     study_dir = Path(study_dir)
     ct_input_dir = Path(ct_input_dir)
@@ -250,7 +250,12 @@ def process_study(
             f"'finding_<index>' found for study: {study_dir}"
         )
 
-    counts = {"discovered": 0, "created": 0, "skipped": 0}
+    counts: dict[str, int | list[Path]] = {
+        "discovered": 0,
+        "created": 0,
+        "skipped": 0,
+        "skipped_paths": [],
+    }
 
     for nodule_dir in nodule_dirs:
         mask_paths = sorted(nodule_dir.glob("slice_*.npy"))
@@ -261,18 +266,21 @@ def process_study(
 
         for mask_path in mask_paths:
             counts["discovered"] += 1
+            output_path = (
+                output_dir
+                / study_name
+                / nodule_dir.name
+                / mask_path.name
+            )
             status = process_mask_file(
                 ct_volume=ct_volume,
                 mask_path=mask_path,
-                output_path=(
-                    output_dir
-                    / study_name
-                    / nodule_dir.name
-                    / mask_path.name
-                ),
+                output_path=output_path,
                 overwrite=overwrite,
             )
             counts[status] += 1
+            if status == "skipped":
+                counts["skipped_paths"].append(output_path.resolve())
 
     return counts
 
@@ -282,7 +290,7 @@ def process_dataset(
     mask_input_dir: str | Path,
     output_dir: str | Path,
     overwrite: bool = False,
-) -> dict[str, int]:
+) -> dict[str, int | list[Path]]:
     """Apply all consensus masks and return processing statistics."""
     ct_input_dir = Path(ct_input_dir)
     mask_input_dir = Path(mask_input_dir)
@@ -307,11 +315,12 @@ def process_dataset(
             f"No study directories found in: {mask_input_dir}"
         )
 
-    totals = {
+    totals: dict[str, int | list[Path]] = {
         "studies": len(study_dirs),
         "discovered": 0,
         "created": 0,
         "skipped": 0,
+        "skipped_paths": [],
     }
 
     for study_dir in tqdm(
@@ -327,8 +336,36 @@ def process_dataset(
         )
         for key in ("discovered", "created", "skipped"):
             totals[key] += counts[key]
+        totals["skipped_paths"].extend(counts["skipped_paths"])
 
     return totals
+
+
+def print_skipped_file_summary(skipped_paths: list[Path]) -> None:
+    """Print skipped output paths grouped by study and nodule directory."""
+    print("\nSkipped file details:")
+
+    if not skipped_paths:
+        print("  None")
+        return
+
+    current_study = None
+    current_nodule = None
+
+    for skipped_path in sorted(skipped_paths):
+        study_name = skipped_path.parent.parent.name
+        nodule_name = skipped_path.parent.name
+
+        if study_name != current_study:
+            print(f"\n  Study: {study_name}")
+            current_study = study_name
+            current_nodule = None
+
+        if nodule_name != current_nodule:
+            print(f"    {nodule_name}:")
+            current_nodule = nodule_name
+
+        print(f"      - {skipped_path}")
 
 
 def main() -> None:
@@ -346,6 +383,7 @@ def main() -> None:
     print(f"Files created     : {totals['created']}")
     print(f"Files skipped     : {totals['skipped']}")
     print(f"Output directory  : {OUTPUT_DIR}")
+    print_skipped_file_summary(totals["skipped_paths"])
 
 
 if __name__ == "__main__":
