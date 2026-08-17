@@ -1,9 +1,10 @@
 """Apply two-dimensional consensus masks to matching CT volume slices.
 
-Consensus masks are stored by study and nodule cluster. A mask named
-``slice_N.npy`` is applied to slice ``N`` of the study's windowed CT volume.
-Each resulting two-dimensional CT slice retains its input dtype and is saved
-using the same study/cluster/filename hierarchy as the consensus mask.
+Consensus masks are stored by study and nodule directory: ``cluster_N`` for
+LIDC-IDRI or ``finding_N`` for LNDb. A mask named ``slice_N.npy`` is applied
+to slice ``N`` of the study's windowed CT volume. Each resulting
+two-dimensional CT slice retains its input dtype and is saved using the same
+directory hierarchy as the consensus mask.
 """
 
 from pathlib import Path
@@ -41,7 +42,7 @@ OUTPUT_DIR = (
 OVERWRITE = False
 
 SLICE_FILENAME_PATTERN = re.compile(r"slice_(\d+)\.npy")
-CLUSTER_DIRECTORY_PATTERN = re.compile(r"cluster_(\d+)")
+NODULE_DIRECTORY_PATTERN = re.compile(r"(?:cluster|finding)_(\d+)")
 
 
 def extract_slice_index(mask_path: str | Path) -> int:
@@ -223,7 +224,7 @@ def process_study(
     output_dir: str | Path,
     overwrite: bool = False,
 ) -> dict[str, int]:
-    """Process every cluster and consensus mask belonging to one study."""
+    """Process every nodule directory and mask belonging to one study."""
     study_dir = Path(study_dir)
     ct_input_dir = Path(ct_input_dir)
     output_dir = Path(output_dir)
@@ -236,30 +237,26 @@ def process_study(
     ct_volume = np.load(ct_path, allow_pickle=False)
     validate_ct_volume(ct_volume, ct_path)
 
-    cluster_dirs = sorted(
+    nodule_dirs = sorted(
         path
-        for path in study_dir.glob("cluster_*")
+        for path in study_dir.iterdir()
         if path.is_dir()
+        and NODULE_DIRECTORY_PATTERN.fullmatch(path.name) is not None
     )
 
-    if not cluster_dirs:
+    if not nodule_dirs:
         raise FileNotFoundError(
-            f"No cluster directories found for study: {study_dir}"
+            "No nodule directories named 'cluster_<index>' or "
+            f"'finding_<index>' found for study: {study_dir}"
         )
 
     counts = {"discovered": 0, "created": 0, "skipped": 0}
 
-    for cluster_dir in cluster_dirs:
-        if CLUSTER_DIRECTORY_PATTERN.fullmatch(cluster_dir.name) is None:
-            raise ValueError(
-                "Expected cluster directory 'cluster_<index>', "
-                f"but received: {cluster_dir}"
-            )
-
-        mask_paths = sorted(cluster_dir.glob("slice_*.npy"))
+    for nodule_dir in nodule_dirs:
+        mask_paths = sorted(nodule_dir.glob("slice_*.npy"))
         if not mask_paths:
             raise FileNotFoundError(
-                f"No consensus mask files found in: {cluster_dir}"
+                f"No consensus mask files found in: {nodule_dir}"
             )
 
         for mask_path in mask_paths:
@@ -270,7 +267,7 @@ def process_study(
                 output_path=(
                     output_dir
                     / study_name
-                    / cluster_dir.name
+                    / nodule_dir.name
                     / mask_path.name
                 ),
                 overwrite=overwrite,
@@ -335,7 +332,7 @@ def process_dataset(
 
 
 def main() -> None:
-    """Apply the configured LIDC consensus masks to windowed CT slices."""
+    """Apply the configured consensus masks to windowed CT slices."""
     totals = process_dataset(
         ct_input_dir=CT_INPUT_DIR,
         mask_input_dir=MASK_INPUT_DIR,
