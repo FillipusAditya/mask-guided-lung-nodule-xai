@@ -15,7 +15,7 @@ from torchvision import models
 from torchvision.models import ResNet50_Weights
 from tqdm import tqdm
 
-from classification.utils import (
+from ..utils import (
     EarlyStopping,
     append_training_log,
     compute_auc,
@@ -130,7 +130,7 @@ TRAINING_STRATEGY = "feature_extraction"
 # TRAINING
 #---------------------------------
 
-NUM_WORKERS = 4
+NUM_WORKERS = 8
 PERSISTENT_WORKERS = True
 PREFETCH_FACTOR = 2
 PIN_MEMORY = torch.cuda.is_available()
@@ -140,8 +140,8 @@ SEED = 42
 #---------------------------------
 
 LEARNING_RATE = 1e-3
-BATCH_SIZE = 4
-NUM_EPOCHS = 5
+BATCH_SIZE = 64
+NUM_EPOCHS = 100
 
 WEIGHT_DECAY_OPTM = 1e-4
 
@@ -172,8 +172,8 @@ SCHEDULER_THRESHOLD_MODE = "rel"
 SCHEDULER_COOLDOWN = 1
 SCHEDULER_MIN_LR = 1e-6
 
-STOPPING_PATIENCE = 20
-STOPPING_MIN_DELTA = 0.0
+STOPPING_PATIENCE = 15
+STOPPING_MIN_DELTA = 1e-4
 EARLY_STOPPING_MONITOR = "val_loss"
 STOPPING_MODE = MONITOR_TO_MODE[EARLY_STOPPING_MONITOR]
 
@@ -233,8 +233,10 @@ def train_one_epoch(
         processed during the epoch.
     """
 
-    # Enable training mode
-    model.train()
+    # Keep the frozen pretrained backbone, including its BatchNorm running
+    # statistics, in evaluation mode. Only the classifier head is trained.
+    model.eval()
+    model.fc.train()
 
     # Initialize training statistics
     running_loss = 0.0
@@ -922,6 +924,37 @@ def main() -> None:
         TRAINING_LOG_PATH
     )
 
+    # Restore and evaluate the best checkpoint so that the final validation
+    # artifacts represent the selected model rather than the last epoch.
+    best_model_state = torch.load(
+        BEST_MODEL_PATH,
+        map_location=DEVICE,
+        weights_only=True,
+    )
+    model.load_state_dict(best_model_state)
+
+    (
+        best_val_metrics,
+        best_val_confusion_matrix,
+        best_val_targets,
+        best_val_probabilities,
+    ) = validate_one_epoch(
+        epoch=0,
+        num_epochs=1,
+        model=model,
+        val_loader=val_loader,
+        criterion=criterion,
+        device=DEVICE,
+        num_classes=num_classes,
+    )
+
+    print(f"Best Model Validation Loss     : {best_val_metrics['loss']:.4f}")
+    print(
+        "Best Model Validation Accuracy : "
+        f"{best_val_metrics['accuracy']:.2%}"
+    )
+    print(f"Best Model ROC AUC             : {best_val_metrics['auc']:.4f}")
+
     plot_loss_curve(
         history,
         FIGURES_DIR
@@ -938,14 +971,14 @@ def main() -> None:
     )
 
     plot_confusion_matrix(
-        confusion_matrix=val_confusion_matrix,
+        confusion_matrix=best_val_confusion_matrix,
         class_names=train_dataset.classes,
         output_dir=FIGURES_DIR,
     )
 
     plot_roc_curve(
-        targets=val_targets.numpy(),
-        probabilities=val_probabilities.numpy(),
+        targets=best_val_targets.numpy(),
+        probabilities=best_val_probabilities.numpy(),
         class_names=train_dataset.classes,
         output_dir=FIGURES_DIR,
     )
