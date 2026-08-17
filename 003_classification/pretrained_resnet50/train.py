@@ -94,9 +94,11 @@ FIGURES_DIR.mkdir(
 #---------------------------------
 DATASET_ROOT = (
     PROJECT_ROOT
-    / "dataset"
-    / "_segmentation_dataset"
+    / "000_dataset"
+    / "_segmentation_dataset_v2"
 )
+
+CT_PATH_COLUMN = "ct_windowed_path"
 
 INPUT_HEIGHT = 224
 INPUT_WIDTH = 224
@@ -481,6 +483,7 @@ def main() -> None:
         split=TRAIN_SPLIT,
         transform=train_transforms,
         class_to_idx=CLASS_TO_IDX,
+        ct_path_column=CT_PATH_COLUMN,
         batch_size=BATCH_SIZE,
         shuffle=TRAIN_SHUFFLE,
         num_workers=NUM_WORKERS,
@@ -495,6 +498,7 @@ def main() -> None:
         split=VAL_SPLIT,
         transform=val_transforms,
         class_to_idx=CLASS_TO_IDX,
+        ct_path_column=CT_PATH_COLUMN,
         batch_size=BATCH_SIZE,
         shuffle=VAL_SHUFFLE,
         num_workers=NUM_WORKERS,
@@ -603,7 +607,7 @@ def main() -> None:
         "data": {
             "dataset_root": str(DATASET_ROOT),
             "metadata_path": str(DATASET_ROOT / "split_metadata.csv"),
-            "ct_directory": str(DATASET_ROOT / "ct"),
+            "ct_path_column": CT_PATH_COLUMN,
             "image_height": INPUT_HEIGHT,
             "image_width": INPUT_WIDTH,
             "input_channels": 3,

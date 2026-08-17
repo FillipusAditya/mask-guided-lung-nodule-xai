@@ -261,14 +261,14 @@ def generate_gradcam_visualizations(
             for batch_index in range(images.size(0)):
                 row = dataset.metadata.iloc[sample_index]
                 filename = str(row["filename"])
-                true_class = str(row["class"])
+                true_class = str(row["label"])
                 predicted_index = int(predictions[batch_index])
                 predicted_class = dataset.classes[predicted_index]
                 predicted_probability = float(
                     probabilities[batch_index, predicted_index]
                 )
 
-                ct_path = dataset.ct_dir / filename
+                ct_path = dataset.get_ct_path(sample_index)
                 ct_image = np.load(
                     ct_path,
                     allow_pickle=False,
@@ -669,6 +669,9 @@ def main() -> None:
         split=TEST_SPLIT,
         transform=test_transform,
         class_to_idx=class_to_idx,
+        ct_path_column=str(
+            data_config.get("ct_path_column", "ct_windowed_path")
+        ),
         batch_size=TEST_BATCH_SIZE,
         shuffle=False,
         num_workers=NUM_WORKERS,

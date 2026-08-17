@@ -18,7 +18,8 @@ class LungClassificationDataset(Dataset):
         "benign": 0,
         "malignant": 1,
     }
-    REQUIRED_COLUMNS = {"filename", "split", "class"}
+    DEFAULT_CT_PATH_COLUMN = "ct_windowed_path"
+    REQUIRED_COLUMNS = {"filename", "split", "label"}
 
     def __init__(
         self,
@@ -26,13 +27,14 @@ class LungClassificationDataset(Dataset):
         split: str,
         transform=None,
         class_to_idx: dict[str, int] | None = None,
+        ct_path_column: str = DEFAULT_CT_PATH_COLUMN,
     ) -> None:
         """Initialize a CSV-backed classification dataset split."""
 
         self.root_dir = Path(root_dir)
-        self.ct_dir = self.root_dir / "ct"
         self.metadata_path = self.root_dir / "split_metadata.csv"
         self.split = split.strip().lower()
+        self.ct_path_column = ct_path_column.strip()
         self.transform = transform
         self.class_to_idx = dict(
             class_to_idx or self.DEFAULT_CLASS_TO_IDX
@@ -43,10 +45,8 @@ class LungClassificationDataset(Dataset):
                 "split must be one of {'train', 'val', 'test'}"
             )
 
-        if not self.ct_dir.is_dir():
-            raise FileNotFoundError(
-                f"CT directory not found: {self.ct_dir}"
-            )
+        if not self.ct_path_column:
+            raise ValueError("ct_path_column must not be empty.")
 
         if not self.metadata_path.is_file():
             raise FileNotFoundError(
@@ -61,7 +61,8 @@ class LungClassificationDataset(Dataset):
             )
 
         metadata = pd.read_csv(self.metadata_path)
-        missing_columns = self.REQUIRED_COLUMNS - set(metadata.columns)
+        required_columns = self.REQUIRED_COLUMNS | {self.ct_path_column}
+        missing_columns = required_columns - set(metadata.columns)
 
         if missing_columns:
             raise ValueError(
@@ -69,16 +70,19 @@ class LungClassificationDataset(Dataset):
                 f"{sorted(missing_columns)}"
             )
 
-        if metadata[list(self.REQUIRED_COLUMNS)].isna().any().any():
+        if metadata[list(required_columns)].isna().any().any():
             raise ValueError(
-                "Columns 'filename', 'split', and 'class' must not contain "
-                "missing values."
+                f"Required columns must not contain missing values: "
+                f"{sorted(required_columns)}"
             )
 
         metadata = metadata.copy()
         metadata["filename"] = metadata["filename"].astype(str).str.strip()
         metadata["split"] = metadata["split"].astype(str).str.strip().str.lower()
-        metadata["class"] = metadata["class"].astype(str).str.strip().str.lower()
+        metadata["label"] = metadata["label"].astype(str).str.strip().str.lower()
+        metadata[self.ct_path_column] = (
+            metadata[self.ct_path_column].astype(str).str.strip()
+        )
 
         invalid_splits = set(metadata["split"].unique()) - self.VALID_SPLITS
         if invalid_splits:
@@ -87,7 +91,7 @@ class LungClassificationDataset(Dataset):
             )
 
         invalid_classes = (
-            set(metadata["class"].unique()) - set(self.class_to_idx)
+            set(metadata["label"].unique()) - set(self.class_to_idx)
         )
         if invalid_classes:
             raise ValueError(
@@ -114,7 +118,7 @@ class LungClassificationDataset(Dataset):
             )
         ]
         self.targets = (
-            self.metadata["class"]
+            self.metadata["label"]
             .map(self.class_to_idx)
             .astype(int)
             .tolist()
@@ -125,12 +129,22 @@ class LungClassificationDataset(Dataset):
 
         return len(self.metadata)
 
+    def get_ct_path(self, index: int) -> Path:
+        """Return the CT path recorded by metadata for one sample."""
+
+        relative_path = Path(
+            str(self.metadata.iloc[index][self.ct_path_column])
+        )
+        if relative_path.is_absolute():
+            return relative_path
+        return self.root_dir / relative_path
+
     def __getitem__(self, index: int) -> tuple[Tensor, Tensor]:
         """Load one CT slice and its classification target."""
 
         row = self.metadata.iloc[index]
         filename = row["filename"]
-        ct_path = self.ct_dir / filename
+        ct_path = self.get_ct_path(index)
 
         if not ct_path.is_file():
             raise FileNotFoundError(f"CT file not found: {ct_path}")
@@ -165,7 +179,7 @@ class LungClassificationDataset(Dataset):
             )
 
         target = torch.tensor(
-            self.class_to_idx[row["class"]],
+            self.class_to_idx[row["label"]],
             dtype=torch.long,
         )
 

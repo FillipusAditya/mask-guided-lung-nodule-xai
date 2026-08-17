@@ -13,6 +13,7 @@ def create_dataloader(
     batch_size: int,
     transform=None,
     class_to_idx: dict[str, int] | None = None,
+    ct_path_column: str = "ct_windowed_path",
     shuffle: bool = False,
     num_workers: int = 4,
     pin_memory: bool = True,
@@ -27,6 +28,7 @@ def create_dataloader(
         split=split,
         transform=transform,
         class_to_idx=class_to_idx,
+        ct_path_column=ct_path_column,
     )
 
     return DataLoader(
