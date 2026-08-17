@@ -8,32 +8,44 @@ from tqdm import tqdm
 # Root directory of the project.
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
-# Directory containing CT volumes (.npy).
-CT_VOLUME_DIR = (
-    PROJECT_ROOT
-    / "dataset"
-    / "_lidc"
-    / "001_volume_npy_v2"
-)
+# Mapping from CT output directory names to source volume directories.
+# Add another entry here to generate an additional CT representation.
+CT_VOLUME_DIRS = {
+    "ct_windowed": (
+        PROJECT_ROOT
+        / "000_dataset"
+        / "_lidc"
+        / "002_windowed_npy"
+    ),
+    "ct_parenchyma": (
+        PROJECT_ROOT
+        / "000_dataset"
+        / "_lidc"
+        / "004_volume_parencyma_npy"
+    ),
+}
 
 # Directory containing consensus masks.
 CONSENSUS_MASK_DIR = (
     PROJECT_ROOT
-    / "dataset"
+    / "000_dataset"
     / "_lidc"
-    / "007_consensus_nodules_npy_v2"
+    / "005_mask_consensus_npy"
 )
 
 # Output directory.
 OUTPUT_DIR = (
     PROJECT_ROOT
-    / "dataset"
+    / "000_dataset"
     / "_lidc"
-    / "009_segmentation_dataset_v2"
+    / "segmentation_dataset"
 )
 
 # Output directories.
-CT_OUTPUT_DIR = OUTPUT_DIR / "ct"
+CT_OUTPUT_DIRS = {
+    output_name: OUTPUT_DIR / output_name
+    for output_name in CT_VOLUME_DIRS
+}
 MASK_OUTPUT_DIR = OUTPUT_DIR / "mask"
 
 # Output metadata.
@@ -143,17 +155,17 @@ def process_scan(scan_dir):
 
     scan_name = scan_dir.name
 
-    volume_path = (
-        CT_VOLUME_DIR
-        / f"{scan_name}.npy"
-    )
+    volumes = {}
 
-    if not volume_path.exists():
-        raise FileNotFoundError(
-            f"CT volume not found: {volume_path}"
-        )
+    for output_name, volume_dir in CT_VOLUME_DIRS.items():
+        volume_path = volume_dir / f"{scan_name}.npy"
 
-    volume = load_volume(volume_path)
+        if not volume_path.exists():
+            raise FileNotFoundError(
+                f"CT volume for {output_name} not found: {volume_path}"
+            )
+
+        volumes[output_name] = load_volume(volume_path)
 
     cluster_dirs = sorted(
         [
@@ -184,15 +196,16 @@ def process_scan(scan_dir):
 
             slice_index = extract_slice_index(mask_path)
 
-            if slice_index >= volume.shape[0]:
-                raise IndexError(
-                    f"{scan_name} slice "
-                    f"{slice_index} exceeds "
-                    f"volume depth "
-                    f"{volume.shape[0]}"
-                )
+            ct_slices = {}
 
-            ct_slice = volume[slice_index]
+            for output_name, volume in volumes.items():
+                if not 0 <= slice_index < volume.shape[0]:
+                    raise IndexError(
+                        f"{scan_name} slice {slice_index} is outside "
+                        f"the {output_name} volume depth {volume.shape[0]}"
+                    )
+
+                ct_slices[output_name] = volume[slice_index]
 
             mask = np.load(mask_path)
 
@@ -202,49 +215,57 @@ def process_scan(scan_dir):
                 f"slice_{slice_index}.npy"
             )
 
-            ct_output_path = (
-                CT_OUTPUT_DIR
-                / filename
-            )
+            ct_output_paths = {
+                output_name: CT_OUTPUT_DIRS[output_name] / filename
+                for output_name in CT_VOLUME_DIRS
+            }
 
             mask_output_path = (
                 MASK_OUTPUT_DIR
                 / filename
             )
 
-            save_ct_slice(
-                ct_slice=ct_slice,
-                output_path=ct_output_path,
-            )
+            for output_name, ct_slice in ct_slices.items():
+                save_ct_slice(
+                    ct_slice=ct_slice,
+                    output_path=ct_output_paths[output_name],
+                )
 
             save_mask(
                 mask=mask,
                 output_path=mask_output_path,
             )
 
-            metadata_rows.append(
+            metadata_row = {
+                "filename": filename,
+                "scan_id": scan_name,
+                "cluster_id": cluster_id,
+                "slice_index": slice_index,
+            }
+
+            for output_name, ct_slice in ct_slices.items():
+                metadata_row[f"{output_name}_path"] = str(
+                    ct_output_paths[output_name].relative_to(
+                        OUTPUT_DIR
+                    )
+                )
+                metadata_row[f"{output_name}_height"] = ct_slice.shape[0]
+                metadata_row[f"{output_name}_width"] = ct_slice.shape[1]
+
+            metadata_row.update(
                 {
-                    "filename": filename,
-                    "scan_id": scan_name,
-                    "cluster_id": cluster_id,
-                    "slice_index": slice_index,
-                    "ct_path": str(
-                        ct_output_path.relative_to(
-                            OUTPUT_DIR
-                        )
-                    ),
                     "mask_path": str(
                         mask_output_path.relative_to(
                             OUTPUT_DIR
                         )
                     ),
-                    "image_height": ct_slice.shape[0],
-                    "image_width": ct_slice.shape[1],
                     "mask_height": mask.shape[0],
                     "mask_width": mask.shape[1],
                     "mask_pixels": int(mask.sum()),
                 }
             )
+
+            metadata_rows.append(metadata_row)
 
     return metadata_rows
 
@@ -258,10 +279,11 @@ def main():
     describing every generated sample is also created.
     """
 
-    CT_OUTPUT_DIR.mkdir(
-        parents=True,
-        exist_ok=True,
-    )
+    for ct_output_dir in CT_OUTPUT_DIRS.values():
+        ct_output_dir.mkdir(
+            parents=True,
+            exist_ok=True,
+        )
 
     MASK_OUTPUT_DIR.mkdir(
         parents=True,
@@ -329,7 +351,8 @@ def main():
     print(f"Generated pairs : {len(metadata_df)}")
     print()
 
-    print(f"CT directory    : {CT_OUTPUT_DIR}")
+    for output_name, ct_output_dir in CT_OUTPUT_DIRS.items():
+        print(f"{output_name:<15} : {ct_output_dir}")
     print(f"Mask directory  : {MASK_OUTPUT_DIR}")
     print(f"Metadata CSV    : {METADATA_CSV}")
 
