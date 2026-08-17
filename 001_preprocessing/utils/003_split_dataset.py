@@ -1,67 +1,71 @@
-"""Generate patient-level train, validation, and test split metadata.
-
-The script scans CT NumPy files from the configured segmentation dataset,
-extracts patient identifiers from their filenames, and assigns each patient
-to exactly one data split.
-
-LIDC-IDRI and LNDb patients are split independently so that each dataset is
-represented in the training, validation, and test subsets. All files that
-belong to the same patient are assigned to the same split to prevent patient-
-level data leakage.
-
-The resulting metadata are saved as a CSV file with the following columns:
-
-- ``dataset``
-- ``patient_id``
-- ``filename``
-- ``split``
-"""
+"""Label prepared samples and create patient-level dataset splits."""
 
 from pathlib import Path
 import re
-from typing import Iterable, Sequence
+from typing import Sequence
 
 import pandas as pd
 from sklearn.model_selection import train_test_split
 from tqdm import tqdm
 
 
-# Root directory of the project.
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
+DATASET_DIR = PROJECT_ROOT / "000_dataset" / "_segmentation_dataset"
 
-# Root directory containing the prepared segmentation dataset.
-DATASET_DIR = (
+DATA_DIRECTORIES = {
+    "ct_windowed_path": DATASET_DIR / "ct_windowed",
+    "ct_parenchyma_path": DATASET_DIR / "ct_parenchyma",
+    "mask_path": DATASET_DIR / "mask",
+}
+
+LIDC_LABEL_CSV = (
     PROJECT_ROOT
-    / "dataset"
-    / "_segmentation_dataset"
+    / "000_dataset"
+    / "_lidc"
+    / "000_metadata"
+    / "003_cluster_metadata_cleaned_path.csv"
+)
+LNDB_LABEL_CSV = (
+    PROJECT_ROOT
+    / "000_dataset"
+    / "_lndb"
+    / "000_metadata"
+    / "004_consensus_clean_path.csv"
 )
 
-# Directory containing CT NumPy files.
-CT_DIR = DATASET_DIR / "ct"
+LABELED_METADATA_CSV = DATASET_DIR / "labeled_metadata.csv"
+SPLIT_METADATA_CSV = DATASET_DIR / "split_metadata.csv"
 
-# Destination CSV file containing split assignments.
-OUTPUT_CSV = DATASET_DIR / "split_metadata.csv"
-
-# Patient-level split ratios.
 TRAIN_RATIO = 0.70
 VAL_RATIO = 0.15
 TEST_RATIO = 0.15
-
-# Random seed used to produce reproducible split assignments.
 RANDOM_SEED = 42
 
-# Supported dataset names.
 LIDC_DATASET_NAME = "LIDC-IDRI"
 LNDB_DATASET_NAME = "LNDb"
-
-# Supported split names.
 TRAIN_SPLIT = "train"
 VAL_SPLIT = "val"
 TEST_SPLIT = "test"
 
-# Filename patterns used to extract patient identifiers.
-LIDC_PATIENT_PATTERN = re.compile(r"^(LIDC-IDRI-\d+)")
-LNDB_PATIENT_PATTERN = re.compile(r"^(LNDb-\d+)")
+LNDB_FILENAME_PATTERN = re.compile(
+    r"^(?P<patient_id>LNDb-(?P<lndbid>\d+))_"
+    r"finding_(?P<finding_id>\d+)_slice_(?P<slice_index>\d+)\.npy$"
+)
+LIDC_FILENAME_PATTERN = re.compile(
+    r"^(?P<patient_id>LIDC-IDRI-\d+)_"
+    r"(?P<study_suffix>\d{5})_(?P<series_suffix>\d{5})_"
+    r"cluster_(?P<cluster_id>\d+)_slice_(?P<slice_index>\d+)\.npy$"
+)
+
+LABELED_METADATA_COLUMNS = [
+    "dataset",
+    "patient_id",
+    "filename",
+    "ct_windowed_path",
+    "ct_parenchyma_path",
+    "mask_path",
+    "label",
+]
 
 
 def validate_split_ratios(
@@ -70,27 +74,7 @@ def validate_split_ratios(
     test_ratio: float,
     tolerance: float = 1e-8,
 ) -> None:
-    """Validate train, validation, and test split ratios.
-
-    Parameters
-    ----------
-    train_ratio : float
-        Proportion of patients assigned to the training split.
-    val_ratio : float
-        Proportion of patients assigned to the validation split.
-    test_ratio : float
-        Proportion of patients assigned to the test split.
-    tolerance : float, default=1e-8
-        Absolute tolerance used when checking whether the ratios sum to one.
-
-    Raises
-    ------
-    TypeError
-        If any ratio is not numeric.
-    ValueError
-        If any ratio is not strictly between zero and one, or if the ratios
-        do not sum to one.
-    """
+    """Validate that positive split ratios sum to one."""
 
     ratios = {
         "train_ratio": train_ratio,
@@ -99,7 +83,7 @@ def validate_split_ratios(
     }
 
     for name, ratio in ratios.items():
-        if not isinstance(ratio, (int, float)):
+        if isinstance(ratio, bool) or not isinstance(ratio, (int, float)):
             raise TypeError(
                 f"Expected {name} to be numeric, "
                 f"but received {type(ratio).__name__}."
@@ -112,7 +96,6 @@ def validate_split_ratios(
             )
 
     total_ratio = train_ratio + val_ratio + test_ratio
-
     if abs(total_ratio - 1.0) > tolerance:
         raise ValueError(
             "Expected train, validation, and test ratios to sum to 1.0, "
@@ -120,95 +103,319 @@ def validate_split_ratios(
         )
 
 
-def extract_patient_id(
-    filename: str,
-) -> str:
-    """Extract a patient identifier from a segmentation filename.
+def require_file(path: str | Path, description: str) -> Path:
+    """Return an existing file path or raise a descriptive error."""
 
-    Parameters
-    ----------
-    filename : str
-        Filename containing an LIDC-IDRI or LNDb patient identifier.
+    path = Path(path)
+    if not path.is_file():
+        raise FileNotFoundError(f"{description} does not exist: {path}")
+    return path
 
-    Returns
-    -------
-    str
-        Extracted patient identifier.
 
-    Raises
-    ------
-    TypeError
-        If ``filename`` is not a string.
-    ValueError
-        If the filename does not match a supported patient naming pattern.
+def parse_slice_list(value: object, field_name: str) -> set[int]:
+    """Parse comma-separated or bracketed slice indices from CSV metadata."""
 
-    Examples
-    --------
-    ``LIDC-IDRI-0001_30178_03192_cluster_0_slice_86.npy`` becomes
-    ``LIDC-IDRI-0001``.
+    if pd.isna(value):
+        raise ValueError(f"Missing {field_name} value.")
 
-    ``LNDb-0311_finding_1_slice_86.npy`` becomes ``LNDb-0311``.
-    """
+    slice_indices = {
+        int(match)
+        for match in re.findall(r"-?\d+", str(value))
+    }
+    if not slice_indices:
+        raise ValueError(
+            f"Could not parse any slice index from {field_name}: {value}"
+        )
+    return slice_indices
 
-    if not isinstance(filename, str):
-        raise TypeError(
-            "Expected filename to be a string, "
-            f"but received {type(filename).__name__}."
+
+def normalize_label(value: object, context: str) -> str:
+    """Return a non-empty classification label."""
+
+    if pd.isna(value):
+        raise ValueError(f"Missing label for {context}.")
+    label = str(value).strip()
+    if not label:
+        raise ValueError(f"Empty label for {context}.")
+    return label
+
+
+def integer_value(value: object, field_name: str, context: str) -> int:
+    """Convert a metadata value to an integer without silent truncation."""
+
+    try:
+        numeric_value = float(value)
+    except (TypeError, ValueError) as error:
+        raise ValueError(
+            f"Invalid {field_name} for {context}: {value}"
+        ) from error
+
+    if not numeric_value.is_integer():
+        raise ValueError(
+            f"Expected integer {field_name} for {context}, but received {value}."
+        )
+    return int(numeric_value)
+
+
+def uid_suffix(value: object, field_name: str, context: str) -> str:
+    """Extract the last five digits from a DICOM UID."""
+
+    if pd.isna(value):
+        raise ValueError(f"Missing {field_name} for {context}.")
+    uid = str(value).strip()
+    if len(uid) < 5 or not uid[-5:].isdigit():
+        raise ValueError(f"Invalid {field_name} for {context}: {value}")
+    return uid[-5:]
+
+
+def add_unique_label(
+    lookup: dict[tuple[object, ...], str],
+    key: tuple[object, ...],
+    label: str,
+    context: str,
+) -> None:
+    """Add one label mapping and reject ambiguous source metadata."""
+
+    if key in lookup:
+        raise ValueError(
+            f"Duplicate label mapping for {context}. "
+            f"Existing: {lookup[key]}; new: {label}."
+        )
+    lookup[key] = label
+
+
+def build_lndb_label_lookup(
+    metadata_csv: str | Path,
+) -> dict[tuple[int, int, int], str]:
+    """Build ``(lndbid, finding_id, slice_index) -> label`` mappings."""
+
+    metadata_df = pd.read_csv(require_file(metadata_csv, "LNDb label CSV"))
+    required_columns = {
+        "lndbid",
+        "findingid",
+        "consensus_slice_list",
+        "label",
+    }
+    missing_columns = required_columns - set(metadata_df.columns)
+    if missing_columns:
+        raise ValueError(
+            f"LNDb label CSV is missing columns: {sorted(missing_columns)}"
         )
 
-    for pattern in (
-        LIDC_PATIENT_PATTERN,
-        LNDB_PATIENT_PATTERN,
+    lookup: dict[tuple[int, int, int], str] = {}
+    for row_index, row in metadata_df.iterrows():
+        context = f"LNDb metadata row {row_index}"
+        lndbid = integer_value(row["lndbid"], "lndbid", context)
+        finding_id = integer_value(row["findingid"], "findingid", context)
+        label = normalize_label(row["label"], context)
+        slice_indices = parse_slice_list(
+            row["consensus_slice_list"],
+            "consensus_slice_list",
+        )
+
+        for slice_index in slice_indices:
+            key = (lndbid, finding_id, slice_index)
+            add_unique_label(lookup, key, label, str(key))
+    return lookup
+
+
+def build_lidc_label_lookup(
+    metadata_csv: str | Path,
+) -> dict[tuple[str, str, str, int, int], str]:
+    """Build LIDC scan, cluster, and slice label mappings."""
+
+    metadata_df = pd.read_csv(
+        require_file(metadata_csv, "LIDC-IDRI label CSV"),
+        dtype={"patient_id": "string"},
+    )
+    required_columns = {
+        "patient_id",
+        "study_instance_uid",
+        "series_instance_uid",
+        "cluster_id",
+        "consensus_mask_slice_list",
+        "label",
+    }
+    missing_columns = required_columns - set(metadata_df.columns)
+    if missing_columns:
+        raise ValueError(
+            f"LIDC-IDRI label CSV is missing columns: {sorted(missing_columns)}"
+        )
+
+    lookup: dict[tuple[str, str, str, int, int], str] = {}
+    for row_index, row in metadata_df.iterrows():
+        context = f"LIDC-IDRI metadata row {row_index}"
+        patient_id = str(row["patient_id"]).strip()
+        if not re.fullmatch(r"LIDC-IDRI-\d+", patient_id):
+            raise ValueError(f"Invalid patient_id for {context}: {patient_id}")
+
+        study_suffix = uid_suffix(
+            row["study_instance_uid"], "study_instance_uid", context
+        )
+        series_suffix = uid_suffix(
+            row["series_instance_uid"], "series_instance_uid", context
+        )
+        cluster_id = integer_value(row["cluster_id"], "cluster_id", context)
+        label = normalize_label(row["label"], context)
+        slice_indices = parse_slice_list(
+            row["consensus_mask_slice_list"],
+            "consensus_mask_slice_list",
+        )
+
+        for slice_index in slice_indices:
+            key = (
+                patient_id,
+                study_suffix,
+                series_suffix,
+                cluster_id,
+                slice_index,
+            )
+            add_unique_label(lookup, key, label, str(key))
+    return lookup
+
+
+def parse_sample_filename(filename: str) -> dict[str, object]:
+    """Parse a supported prepared-sample filename."""
+
+    lndb_match = LNDB_FILENAME_PATTERN.fullmatch(filename)
+    if lndb_match is not None:
+        return {
+            "dataset": LNDB_DATASET_NAME,
+            "patient_id": lndb_match.group("patient_id"),
+            "label_key": (
+                int(lndb_match.group("lndbid")),
+                int(lndb_match.group("finding_id")),
+                int(lndb_match.group("slice_index")),
+            ),
+        }
+
+    lidc_match = LIDC_FILENAME_PATTERN.fullmatch(filename)
+    if lidc_match is not None:
+        return {
+            "dataset": LIDC_DATASET_NAME,
+            "patient_id": lidc_match.group("patient_id"),
+            "label_key": (
+                lidc_match.group("patient_id"),
+                lidc_match.group("study_suffix"),
+                lidc_match.group("series_suffix"),
+                int(lidc_match.group("cluster_id")),
+                int(lidc_match.group("slice_index")),
+            ),
+        }
+
+    raise ValueError(f"Unsupported sample filename: {filename}")
+
+
+def collect_aligned_filenames(
+    data_directories: dict[str, Path],
+) -> list[str]:
+    """Return filenames present in every configured data directory."""
+
+    filename_sets: dict[str, set[str]] = {}
+    for column_name, directory in data_directories.items():
+        directory = Path(directory)
+        if not directory.exists():
+            raise FileNotFoundError(
+                f"Dataset directory for {column_name} does not exist: {directory}"
+            )
+        if not directory.is_dir():
+            raise NotADirectoryError(
+                f"Expected a directory for {column_name}: {directory}"
+            )
+
+        filenames = {
+            path.name
+            for path in directory.glob("*.npy")
+            if path.is_file()
+        }
+        if not filenames:
+            raise FileNotFoundError(
+                f"No .npy files found for {column_name}: {directory}"
+            )
+        filename_sets[column_name] = filenames
+
+    reference_column = next(iter(data_directories))
+    reference_filenames = filename_sets[reference_column]
+    alignment_errors: list[str] = []
+    for column_name, filenames in filename_sets.items():
+        missing = sorted(reference_filenames - filenames)
+        unexpected = sorted(filenames - reference_filenames)
+        if missing or unexpected:
+            alignment_errors.append(
+                f"{column_name}: missing {len(missing)} "
+                f"(examples: {missing[:5]}), unexpected {len(unexpected)} "
+                f"(examples: {unexpected[:5]})"
+            )
+
+    if alignment_errors:
+        raise RuntimeError(
+            "Dataset directories do not contain identical .npy filenames. "
+            + " | ".join(alignment_errors)
+        )
+    return sorted(reference_filenames)
+
+
+def build_labeled_metadata(
+    filenames: Sequence[str],
+    data_directories: dict[str, Path],
+    lndb_label_lookup: dict[tuple[int, int, int], str],
+    lidc_label_lookup: dict[tuple[str, str, str, int, int], str],
+    dataset_dir: str | Path = DATASET_DIR,
+) -> pd.DataFrame:
+    """Build path and classification-label metadata for prepared samples."""
+
+    dataset_dir = Path(dataset_dir)
+    records: list[dict[str, str]] = []
+    for filename in tqdm(
+        filenames,
+        desc="Labeling dataset samples",
+        unit="file",
     ):
-        match = pattern.match(filename)
-
-        if match is not None:
-            return match.group(1)
-
-    raise ValueError(
-        "Could not extract a supported patient identifier from filename: "
-        f"{filename}"
-    )
-
-
-def get_dataset_name(
-    patient_id: str,
-) -> str:
-    """Return the source dataset associated with a patient identifier.
-
-    Parameters
-    ----------
-    patient_id : str
-        Patient identifier extracted from a filename.
-
-    Returns
-    -------
-    str
-        Either ``"LIDC-IDRI"`` or ``"LNDb"``.
-
-    Raises
-    ------
-    TypeError
-        If ``patient_id`` is not a string.
-    ValueError
-        If the patient identifier does not belong to a supported dataset.
-    """
-
-    if not isinstance(patient_id, str):
-        raise TypeError(
-            "Expected patient_id to be a string, "
-            f"but received {type(patient_id).__name__}."
+        sample = parse_sample_filename(filename)
+        dataset_name = str(sample["dataset"])
+        label_key = sample["label_key"]
+        label = (
+            lndb_label_lookup.get(label_key)
+            if dataset_name == LNDB_DATASET_NAME
+            else lidc_label_lookup.get(label_key)
         )
+        if label is None:
+            raise KeyError(
+                f"No classification label found for {filename} "
+                f"using key {label_key}."
+            )
 
-    if patient_id.startswith(LIDC_DATASET_NAME):
-        return LIDC_DATASET_NAME
+        record = {
+            "dataset": dataset_name,
+            "patient_id": str(sample["patient_id"]),
+            "filename": filename,
+        }
+        for column_name, directory in data_directories.items():
+            record[column_name] = (
+                Path(directory) / filename
+            ).relative_to(dataset_dir).as_posix()
+        record["label"] = label
+        records.append(record)
 
-    if patient_id.startswith(LNDB_DATASET_NAME):
-        return LNDB_DATASET_NAME
+    metadata_df = pd.DataFrame(records, columns=LABELED_METADATA_COLUMNS)
+    if metadata_df.empty:
+        raise ValueError("Cannot build metadata from an empty filename list.")
+    return metadata_df.sort_values(
+        by=["dataset", "patient_id", "filename"],
+        kind="stable",
+    ).reset_index(drop=True)
 
-    raise ValueError(
-        f"Unsupported patient identifier: {patient_id}"
-    )
+
+def save_metadata(metadata_df: pd.DataFrame, output_csv: str | Path) -> None:
+    """Save a non-empty metadata table to CSV."""
+
+    if metadata_df.empty:
+        raise ValueError("Cannot save an empty metadata table.")
+    output_csv = Path(output_csv)
+    if output_csv.suffix.lower() != ".csv":
+        raise ValueError(f"Expected a .csv output path: {output_csv}")
+    output_csv.parent.mkdir(parents=True, exist_ok=True)
+    metadata_df.to_csv(output_csv, index=False)
 
 
 def split_patients(
@@ -218,54 +425,16 @@ def split_patients(
     test_ratio: float = TEST_RATIO,
     random_seed: int = RANDOM_SEED,
 ) -> tuple[set[str], set[str], set[str]]:
-    """Split patient identifiers into train, validation, and test subsets.
+    """Split unique patients into train, validation, and test subsets."""
 
-    The first split separates the training patients from the temporary
-    validation-test subset. The second split divides the temporary subset
-    according to the relative validation and test proportions.
-
-    Parameters
-    ----------
-    patient_ids : Sequence[str]
-        Unique patient identifiers from one dataset.
-    train_ratio : float, default=TRAIN_RATIO
-        Proportion assigned to the training subset.
-    val_ratio : float, default=VAL_RATIO
-        Proportion assigned to the validation subset.
-    test_ratio : float, default=TEST_RATIO
-        Proportion assigned to the test subset.
-    random_seed : int, default=RANDOM_SEED
-        Seed used by scikit-learn to make the split reproducible.
-
-    Returns
-    -------
-    tuple[set[str], set[str], set[str]]
-        Training, validation, and test patient identifier sets.
-
-    Raises
-    ------
-    ValueError
-        If the ratios are invalid, patient identifiers are duplicated, or
-        there are too few patients to create all three subsets.
-    """
-
-    validate_split_ratios(
-        train_ratio=train_ratio,
-        val_ratio=val_ratio,
-        test_ratio=test_ratio,
-    )
-
+    validate_split_ratios(train_ratio, val_ratio, test_ratio)
     unique_patient_ids = list(dict.fromkeys(patient_ids))
-
     if len(unique_patient_ids) != len(patient_ids):
+        raise ValueError("Expected unique patient identifiers.")
+    if len(unique_patient_ids) < 4:
         raise ValueError(
-            "Expected patient_ids to contain unique patient identifiers."
-        )
-
-    if len(unique_patient_ids) < 3:
-        raise ValueError(
-            "At least three patients are required to create train, "
-            "validation, and test subsets."
+            "At least four patients are required to create non-empty train, "
+            "validation, and test subsets with the configured two-stage split."
         )
 
     train_ids, temporary_ids = train_test_split(
@@ -274,30 +443,16 @@ def split_patients(
         shuffle=True,
         random_state=random_seed,
     )
-
-    adjusted_val_ratio = val_ratio / (
-        val_ratio + test_ratio
-    )
-
+    adjusted_val_ratio = val_ratio / (val_ratio + test_ratio)
     val_ids, test_ids = train_test_split(
         temporary_ids,
         train_size=adjusted_val_ratio,
         shuffle=True,
         random_state=random_seed,
     )
-
-    train_set = set(train_ids)
-    val_set = set(val_ids)
-    test_set = set(test_ids)
-
-    validate_split_membership(
-        train_ids=train_set,
-        val_ids=val_set,
-        test_ids=test_set,
-        expected_ids=set(unique_patient_ids),
-    )
-
-    return train_set, val_set, test_set
+    splits = (set(train_ids), set(val_ids), set(test_ids))
+    validate_split_membership(*splits, expected_ids=set(unique_patient_ids))
+    return splits
 
 
 def validate_split_membership(
@@ -306,113 +461,40 @@ def validate_split_membership(
     test_ids: set[str],
     expected_ids: set[str],
 ) -> None:
-    """Validate that split assignments are complete and mutually exclusive.
+    """Validate complete and mutually exclusive patient assignments."""
 
-    Parameters
-    ----------
-    train_ids : set[str]
-        Patient identifiers assigned to training.
-    val_ids : set[str]
-        Patient identifiers assigned to validation.
-    test_ids : set[str]
-        Patient identifiers assigned to testing.
-    expected_ids : set[str]
-        Complete set of patient identifiers expected across all splits.
-
-    Raises
-    ------
-    RuntimeError
-        If patients overlap across splits or if the combined split membership
-        does not match ``expected_ids``.
-    """
-
-    if train_ids & val_ids:
-        raise RuntimeError(
-            "Patient overlap detected between train and validation splits."
-        )
-
-    if train_ids & test_ids:
-        raise RuntimeError(
-            "Patient overlap detected between train and test splits."
-        )
-
-    if val_ids & test_ids:
-        raise RuntimeError(
-            "Patient overlap detected between validation and test splits."
-        )
+    overlaps = {
+        "train/validation": train_ids & val_ids,
+        "train/test": train_ids & test_ids,
+        "validation/test": val_ids & test_ids,
+    }
+    for split_pair, overlap in overlaps.items():
+        if overlap:
+            raise RuntimeError(
+                f"Patient overlap detected for {split_pair}: {sorted(overlap)}"
+            )
 
     assigned_ids = train_ids | val_ids | test_ids
-
     if assigned_ids != expected_ids:
-        missing_ids = sorted(expected_ids - assigned_ids)
-        unexpected_ids = sorted(assigned_ids - expected_ids)
-
         raise RuntimeError(
             "Patient split membership is incomplete or inconsistent. "
-            f"Missing: {missing_ids}. Unexpected: {unexpected_ids}."
+            f"Missing: {sorted(expected_ids - assigned_ids)}. "
+            f"Unexpected: {sorted(assigned_ids - expected_ids)}."
         )
 
 
-def collect_patient_files(
-    ct_dir: str | Path,
-) -> dict[str, list[str]]:
-    """Group CT NumPy filenames by patient identifier.
+def select_patients_by_dataset(
+    metadata_df: pd.DataFrame,
+    dataset_name: str,
+) -> list[str]:
+    """Return sorted unique patients belonging to one source dataset."""
 
-    Parameters
-    ----------
-    ct_dir : str | Path
-        Directory containing segmentation CT files in NumPy format.
-
-    Returns
-    -------
-    dict[str, list[str]]
-        Mapping from patient identifiers to sorted CT filenames.
-
-    Raises
-    ------
-    FileNotFoundError
-        If ``ct_dir`` does not exist or contains no ``.npy`` files.
-    NotADirectoryError
-        If ``ct_dir`` is not a directory.
-    """
-
-    ct_dir = Path(ct_dir)
-
-    if not ct_dir.exists():
-        raise FileNotFoundError(
-            f"CT directory does not exist: {ct_dir}"
-        )
-
-    if not ct_dir.is_dir():
-        raise NotADirectoryError(
-            f"Expected a CT directory, but received: {ct_dir}"
-        )
-
-    ct_files = sorted(ct_dir.glob("*.npy"))
-
-    if not ct_files:
-        raise FileNotFoundError(
-            f"No .npy files found in CT directory: {ct_dir}"
-        )
-
-    patient_files: dict[str, list[str]] = {}
-
-    for ct_file in tqdm(
-        ct_files,
-        desc="Grouping files by patient",
-        unit="file",
-    ):
-        patient_id = extract_patient_id(ct_file.name)
-
-        patient_files.setdefault(
-            patient_id,
-            [],
-        ).append(ct_file.name)
-
-    for filenames in patient_files.values():
-        filenames.sort()
-
-    return patient_files
+    return sorted(
+        metadata_df.loc[
+            metadata_df["dataset"] == dataset_name,
+            "patient_id",
+        ].unique()
+    )
 
 
 def assign_patient_split(
@@ -421,338 +503,142 @@ def assign_patient_split(
     val_ids: set[str],
     test_ids: set[str],
 ) -> str:
-    """Return the split assigned to one patient.
+    """Return the unique split assigned to a patient."""
 
-    Parameters
-    ----------
-    patient_id : str
-        Patient identifier to classify.
-    train_ids : set[str]
-        Patient identifiers assigned to training.
-    val_ids : set[str]
-        Patient identifiers assigned to validation.
-    test_ids : set[str]
-        Patient identifiers assigned to testing.
-
-    Returns
-    -------
-    str
-        One of ``"train"``, ``"val"``, or ``"test"``.
-
-    Raises
-    ------
-    RuntimeError
-        If the patient does not belong to exactly one split.
-    """
-
-    matching_splits: list[str] = []
-
-    if patient_id in train_ids:
-        matching_splits.append(TRAIN_SPLIT)
-
-    if patient_id in val_ids:
-        matching_splits.append(VAL_SPLIT)
-
-    if patient_id in test_ids:
-        matching_splits.append(TEST_SPLIT)
-
+    matching_splits = [
+        split_name
+        for split_name, patient_ids in (
+            (TRAIN_SPLIT, train_ids),
+            (VAL_SPLIT, val_ids),
+            (TEST_SPLIT, test_ids),
+        )
+        if patient_id in patient_ids
+    ]
     if len(matching_splits) != 1:
         raise RuntimeError(
-            f"Expected patient {patient_id} to belong to exactly one split, "
-            f"but found assignments: {matching_splits}."
+            f"Expected patient {patient_id} in exactly one split, "
+            f"but found: {matching_splits}."
         )
-
     return matching_splits[0]
 
 
-def build_split_metadata(
-    patient_files: dict[str, list[str]],
+def add_split_assignments(
+    labeled_metadata_df: pd.DataFrame,
     train_ids: set[str],
     val_ids: set[str],
     test_ids: set[str],
 ) -> pd.DataFrame:
-    """Build file-level metadata from patient-level split assignments.
+    """Add patient-level split assignments to labeled metadata."""
 
-    Parameters
-    ----------
-    patient_files : dict[str, list[str]]
-        Mapping from patient identifiers to CT filenames.
-    train_ids : set[str]
-        Patient identifiers assigned to training.
-    val_ids : set[str]
-        Patient identifiers assigned to validation.
-    test_ids : set[str]
-        Patient identifiers assigned to testing.
-
-    Returns
-    -------
-    pandas.DataFrame
-        File-level split metadata with columns ``dataset``, ``patient_id``,
-        ``filename``, and ``split``.
-    """
-
-    metadata_records: list[dict[str, str]] = []
-
-    for patient_id in tqdm(
-        sorted(patient_files),
-        desc="Generating split metadata",
-        unit="patient",
-    ):
-        split_name = assign_patient_split(
-            patient_id=patient_id,
-            train_ids=train_ids,
-            val_ids=val_ids,
-            test_ids=test_ids,
+    metadata_df = labeled_metadata_df.copy()
+    metadata_df["split"] = metadata_df["patient_id"].map(
+        lambda patient_id: assign_patient_split(
+            patient_id, train_ids, val_ids, test_ids
         )
-
-        dataset_name = get_dataset_name(patient_id)
-
-        for filename in patient_files[patient_id]:
-            metadata_records.append(
-                {
-                    "dataset": dataset_name,
-                    "patient_id": patient_id,
-                    "filename": filename,
-                    "split": split_name,
-                }
-            )
-
-    metadata_df = pd.DataFrame(
-        metadata_records,
-        columns=[
-            "dataset",
-            "patient_id",
-            "filename",
-            "split",
-        ],
     )
-
-    return metadata_df.sort_values(
-        by=[
-            "split",
-            "dataset",
-            "patient_id",
-            "filename",
-        ],
+    split_order = pd.CategoricalDtype(
+        categories=[TRAIN_SPLIT, VAL_SPLIT, TEST_SPLIT],
+        ordered=True,
+    )
+    metadata_df["split"] = metadata_df["split"].astype(split_order)
+    metadata_df = metadata_df.sort_values(
+        by=["split", "dataset", "patient_id", "filename"],
         kind="stable",
     ).reset_index(drop=True)
+    metadata_df["split"] = metadata_df["split"].astype("string")
+    return metadata_df
 
 
-def save_split_metadata(
+def print_summary(
     metadata_df: pd.DataFrame,
-    output_csv: str | Path,
+    patient_splits: dict[str, tuple[set[str], set[str], set[str]]],
 ) -> None:
-    """Save split metadata as a CSV file.
-
-    Parameters
-    ----------
-    metadata_df : pandas.DataFrame
-        Metadata table to save.
-    output_csv : str | Path
-        Destination path using the ``.csv`` suffix.
-
-    Raises
-    ------
-    ValueError
-        If the metadata table is empty or ``output_csv`` does not use the
-        ``.csv`` suffix.
-    """
-
-    if metadata_df.empty:
-        raise ValueError(
-            "Cannot save an empty split metadata table."
-        )
-
-    output_csv = Path(output_csv)
-
-    if output_csv.suffix.lower() != ".csv":
-        raise ValueError(
-            "Expected output_csv to use the .csv suffix, "
-            f"but received: {output_csv}"
-        )
-
-    output_csv.parent.mkdir(
-        parents=True,
-        exist_ok=True,
-    )
-
-    metadata_df.to_csv(
-        output_csv,
-        index=False,
-    )
-
-
-def select_patients_by_prefix(
-    patient_ids: Iterable[str],
-    prefix: str,
-) -> list[str]:
-    """Select and sort patient identifiers beginning with a prefix.
-
-    Parameters
-    ----------
-    patient_ids : Iterable[str]
-        Patient identifiers to filter.
-    prefix : str
-        Required patient identifier prefix.
-
-    Returns
-    -------
-    list[str]
-        Sorted identifiers matching the prefix.
-    """
-
-    return sorted(
-        patient_id
-        for patient_id in patient_ids
-        if patient_id.startswith(prefix)
-    )
-
-
-def print_split_summary(
-    metadata_df: pd.DataFrame,
-    lidc_patients: Sequence[str],
-    lndb_patients: Sequence[str],
-    lidc_splits: tuple[set[str], set[str], set[str]],
-    lndb_splits: tuple[set[str], set[str], set[str]],
-    output_csv: Path,
-) -> None:
-    """Print patient-level and file-level split summaries.
-
-    Parameters
-    ----------
-    metadata_df : pandas.DataFrame
-        Generated file-level split metadata.
-    lidc_patients : Sequence[str]
-        All LIDC-IDRI patient identifiers.
-    lndb_patients : Sequence[str]
-        All LNDb patient identifiers.
-    lidc_splits : tuple[set[str], set[str], set[str]]
-        LIDC-IDRI train, validation, and test patient sets.
-    lndb_splits : tuple[set[str], set[str], set[str]]
-        LNDb train, validation, and test patient sets.
-    output_csv : pathlib.Path
-        Path where the metadata CSV was saved.
-    """
-
-    lidc_train, lidc_val, lidc_test = lidc_splits
-    lndb_train, lndb_val, lndb_test = lndb_splits
+    """Print label, patient, and sample-level summaries."""
 
     print()
-    print("=" * 60)
+    print("=" * 72)
     print("Patient summary")
-    print("=" * 60)
-
-    print(f"\n{LIDC_DATASET_NAME}: {len(lidc_patients)} patients")
-    print(f"  Train : {len(lidc_train)}")
-    print(f"  Val   : {len(lidc_val)}")
-    print(f"  Test  : {len(lidc_test)}")
-
-    print(f"\n{LNDB_DATASET_NAME}: {len(lndb_patients)} patients")
-    print(f"  Train : {len(lndb_train)}")
-    print(f"  Val   : {len(lndb_val)}")
-    print(f"  Test  : {len(lndb_test)}")
+    print("=" * 72)
+    for dataset_name, (train_ids, val_ids, test_ids) in patient_splits.items():
+        total = len(train_ids | val_ids | test_ids)
+        print(f"\n{dataset_name}: {total} patients")
+        print(f"  Train : {len(train_ids)}")
+        print(f"  Val   : {len(val_ids)}")
+        print(f"  Test  : {len(test_ids)}")
 
     print()
-    print("=" * 60)
-    print("File summary")
-    print("=" * 60)
+    print("=" * 72)
+    print("Sample summary by dataset, split, and label")
+    print("=" * 72)
     print()
-
-    file_summary = (
+    summary = (
         metadata_df.groupby(
-            ["dataset", "split"],
+            ["dataset", "split", "label"],
             observed=True,
         )
         .size()
-        .rename("file_count")
+        .rename("sample_count")
         .reset_index()
     )
-
-    print(file_summary.to_string(index=False))
-
+    print(summary.to_string(index=False))
     print()
-    print("=" * 60)
-    print(f"Split metadata saved to:\n{output_csv}")
-    print("=" * 60)
+    print("=" * 72)
+    print(f"Labeled metadata: {LABELED_METADATA_CSV}")
+    print(f"Split metadata  : {SPLIT_METADATA_CSV}")
+    print("=" * 72)
 
 
 def main() -> None:
-    """Generate patient-level segmentation dataset split metadata."""
+    """Build labeled metadata first, then generate patient-level splits."""
 
-    validate_split_ratios(
-        train_ratio=TRAIN_RATIO,
-        val_ratio=VAL_RATIO,
-        test_ratio=TEST_RATIO,
+    validate_split_ratios(TRAIN_RATIO, VAL_RATIO, TEST_RATIO)
+    filenames = collect_aligned_filenames(DATA_DIRECTORIES)
+    lndb_label_lookup = build_lndb_label_lookup(LNDB_LABEL_CSV)
+    lidc_label_lookup = build_lidc_label_lookup(LIDC_LABEL_CSV)
+
+    labeled_metadata_df = build_labeled_metadata(
+        filenames,
+        DATA_DIRECTORIES,
+        lndb_label_lookup,
+        lidc_label_lookup,
     )
+    save_metadata(labeled_metadata_df, LABELED_METADATA_CSV)
 
-    patient_files = collect_patient_files(
-        ct_dir=CT_DIR,
+    lidc_patients = select_patients_by_dataset(
+        labeled_metadata_df, LIDC_DATASET_NAME
     )
-
-    lidc_patients = select_patients_by_prefix(
-        patient_ids=patient_files,
-        prefix=LIDC_DATASET_NAME,
+    lndb_patients = select_patients_by_dataset(
+        labeled_metadata_df, LNDB_DATASET_NAME
     )
-
-    lndb_patients = select_patients_by_prefix(
-        patient_ids=patient_files,
-        prefix=LNDB_DATASET_NAME,
-    )
-
     if not lidc_patients:
-        raise RuntimeError(
-            "No LIDC-IDRI patients were found in the CT directory."
-        )
-
+        raise RuntimeError("No labeled LIDC-IDRI patients were found.")
     if not lndb_patients:
-        raise RuntimeError(
-            "No LNDb patients were found in the CT directory."
-        )
+        raise RuntimeError("No labeled LNDb patients were found.")
 
-    lidc_splits = split_patients(
-        patient_ids=lidc_patients,
-    )
-
-    lndb_splits = split_patients(
-        patient_ids=lndb_patients,
-    )
-
-    lidc_train, lidc_val, lidc_test = lidc_splits
-    lndb_train, lndb_val, lndb_test = lndb_splits
-
-    train_patients = lidc_train | lndb_train
-    val_patients = lidc_val | lndb_val
-    test_patients = lidc_test | lndb_test
-
-    all_patient_ids = set(patient_files)
+    patient_splits = {
+        LIDC_DATASET_NAME: split_patients(lidc_patients),
+        LNDB_DATASET_NAME: split_patients(lndb_patients),
+    }
+    lidc_train, lidc_val, lidc_test = patient_splits[LIDC_DATASET_NAME]
+    lndb_train, lndb_val, lndb_test = patient_splits[LNDB_DATASET_NAME]
+    train_ids = lidc_train | lndb_train
+    val_ids = lidc_val | lndb_val
+    test_ids = lidc_test | lndb_test
 
     validate_split_membership(
-        train_ids=train_patients,
-        val_ids=val_patients,
-        test_ids=test_patients,
-        expected_ids=all_patient_ids,
+        train_ids,
+        val_ids,
+        test_ids,
+        expected_ids=set(labeled_metadata_df["patient_id"]),
     )
-
-    metadata_df = build_split_metadata(
-        patient_files=patient_files,
-        train_ids=train_patients,
-        val_ids=val_patients,
-        test_ids=test_patients,
+    split_metadata_df = add_split_assignments(
+        labeled_metadata_df,
+        train_ids,
+        val_ids,
+        test_ids,
     )
-
-    save_split_metadata(
-        metadata_df=metadata_df,
-        output_csv=OUTPUT_CSV,
-    )
-
-    print_split_summary(
-        metadata_df=metadata_df,
-        lidc_patients=lidc_patients,
-        lndb_patients=lndb_patients,
-        lidc_splits=lidc_splits,
-        lndb_splits=lndb_splits,
-        output_csv=OUTPUT_CSV,
-    )
+    save_metadata(split_metadata_df, SPLIT_METADATA_CSV)
+    print_summary(split_metadata_df, patient_splits)
 
 
 if __name__ == "__main__":
