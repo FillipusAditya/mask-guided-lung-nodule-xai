@@ -98,7 +98,8 @@ DATASET_ROOT = (
     / "_segmentation_dataset_v2"
 )
 
-CT_PATH_COLUMN = "ct_windowed_path"
+# CT_PATH_COLUMN = "ct_windowed_path"
+CT_PATH_COLUMN = "ct_parenchyma_path"
 
 INPUT_HEIGHT = 224
 INPUT_WIDTH = 224
@@ -125,6 +126,7 @@ VAL_DROP_LAST = False
 WEIGHTS = ResNet50_Weights.DEFAULT
 MODEL_ARCHITECTURE = "ResNet50"
 TRAINING_STRATEGY = "feature_extraction"
+CLASSIFIER_DROPOUT = 0.3
 
 #---------------------------------
 # TRAINING
@@ -528,9 +530,12 @@ def main() -> None:
 
     num_classes = len(train_dataset.classes)
 
-    model.fc = nn.Linear(
-        in_features=model.fc.in_features,
-        out_features=num_classes
+    model.fc = nn.Sequential(
+        nn.Dropout(p=CLASSIFIER_DROPOUT),
+        nn.Linear(
+            in_features=model.fc.in_features,
+            out_features=num_classes,
+        ),
     )
 
     for param in model.parameters():
@@ -596,6 +601,10 @@ def main() -> None:
             "num_classes": num_classes,
             "backbone_frozen": True,
             "trainable_component": "fc",
+            "classifier": {
+                "architecture": "dropout_linear",
+                "dropout_probability": CLASSIFIER_DROPOUT,
+            },
             "total_parameters": sum(
                 parameter.numel()
                 for parameter in model.parameters()
