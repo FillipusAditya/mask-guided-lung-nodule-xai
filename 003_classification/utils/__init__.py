@@ -51,6 +51,13 @@ from .metrics import (
 )
 
 #---------------------------------
+# PREDICTION
+#---------------------------------
+from .prediction import (
+    binary_probabilities_to_predictions,
+)
+
+#---------------------------------
 # RANDOM SEED
 #---------------------------------
 from .seed import (

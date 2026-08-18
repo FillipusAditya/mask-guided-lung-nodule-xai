@@ -59,6 +59,12 @@ class EarlyStopping:
 
         return self.early_stop
 
+    def reset_counter(self) -> None:
+        """Reset patience while retaining the best metric and its epoch."""
+
+        self.counter = 0
+        self.early_stop = False
+
     def _is_improved(self, metric: float) -> bool:
         """Return whether the metric sufficiently improves on the best value."""
 
