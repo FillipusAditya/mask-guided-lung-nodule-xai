@@ -21,14 +21,14 @@ LIDC_INPUT_DIR = (
     PROJECT_ROOT
     / "000_dataset"
     / "_lidc"
-    / "002_windowed_npy"
+    / "006_masked_consensus_npy"
 )
 
 LNDB_INPUT_DIR = (
     PROJECT_ROOT
     / "000_dataset"
     / "_lndb"
-    / "002_windowed_npy"
+    / "006_masked_consensus_npy"
 )
 
 # Directories where JPG visualization files will be stored.
@@ -36,14 +36,16 @@ LIDC_OUTPUT_DIR = (
     PROJECT_ROOT
     / "000_dataset"
     / "_lidc"
-    / "003_windowed_jpg"
+    / "000_jpgs"
+    / "006_masked_consensus_jpg"
 )
 
 LNDB_OUTPUT_DIR = (
     PROJECT_ROOT
     / "000_dataset"
     / "_lndb"
-    / "003_windowed_jpg"
+    / "000_jpgs"
+    / "006_masked_consensus_jpg"
 )
 
 def normalized_ct_to_uint8(
@@ -284,12 +286,12 @@ def convert_ct_directory(
 def main() -> None:
     """Convert normalized LIDC-IDRI and LNDb CT volumes to JPG images."""
 
-    print("Converting LIDC-IDRI normalized CT volumes...")
+    # print("Converting LIDC-IDRI normalized CT volumes...")
 
-    convert_ct_directory(
-        input_dir=LIDC_INPUT_DIR,
-        output_dir=LIDC_OUTPUT_DIR,
-    )
+    # convert_ct_directory(
+    #     input_dir=LIDC_INPUT_DIR,
+    #     output_dir=LIDC_OUTPUT_DIR,
+    # )
 
     print("\nConverting LNDb normalized CT volumes...")
 

@@ -22,35 +22,45 @@ from lndb_consensus import (
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 # Directory of ct.mhd
-DATA_DIR = PROJECT_ROOT / "dataset" / "lndb" / "data"
+DATA_DIR = (
+    PROJECT_ROOT 
+    / "000_dataset" 
+    / "lndb" 
+    / "data"
+)
 
 # Directory of mask.mhd
-MASK_DIR = PROJECT_ROOT / "dataset" / "lndb" / "masks"
+MASK_DIR = (
+    PROJECT_ROOT 
+    / "000_dataset" 
+    / "lndb" 
+    / "masks"
+)
 
 # Metadata containing the selected nodule
 CSV_PATH = (
     PROJECT_ROOT 
-    / "dataset" 
+    / "000_dataset" 
     / "_lndb" 
     / "000_metadata" 
-    / "consensus_clean.csv"
+    / "003_consensus_clean.csv"
 )
 
 # Directory where consensus masks will be stored
 OUTPUT_DIR = (
     PROJECT_ROOT 
-    / "dataset"
+    / "000_dataset"
     / "_lndb" 
-    / "consensus_nodules"
+    / "005_mask_consensus_npy"
 )
 
 # Metadata with and additional column containing the consensus mask path
 OUTPUT_METADATA_CSV = (
     PROJECT_ROOT
-    / "dataset"
+    / "000_dataset"
     / "_lndb"
     / "000_metadata"
-    / "consensus_clean_path.csv"
+    / "004_consensus_clean_path.csv"
 )
 
 

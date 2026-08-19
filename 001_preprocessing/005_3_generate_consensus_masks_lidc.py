@@ -13,27 +13,27 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 # Metadata containing the selected nodule clusters
 METADATA_CSV_PATH = (
     PROJECT_ROOT
-    / "dataset"
+    / "000_dataset"
     / "_lidc"
     / "000_metadata"
-    / "002_cluster_metadata_cleaned_v2.csv"
+    / "002_cluster_metadata_cleaned.csv"
 )
 
 # Directory where consensus masks will be stored
 OUTPUT_DIRECTORY = (
     PROJECT_ROOT
-    / "dataset"
+    / "000_dataset"
     / "_lidc"
-    / "007_consensus_nodules_npy_v2"
+    / "005_mask_consensus_npy"
 )
 
 # Metadata with an additional column containing the consensus mask path
 OUTPUT_METADATA_CSV_PATH = (
     PROJECT_ROOT
-    / "dataset"
+    / "000_dataset"
     / "_lidc"
     / "000_metadata"
-    / "003_cluster_metadata_cleaned_path_v2.csv"
+    / "003_cluster_metadata_cleaned_path.csv"
 )
 
 

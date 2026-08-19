@@ -21,7 +21,7 @@ CT_VOLUME_DIRS = {
         PROJECT_ROOT
         / "000_dataset"
         / "_lndb"
-        / "004_volume_parenchyma_npy"
+        / "004_volume_parencyma_npy"
     ),
 }
 
@@ -38,7 +38,7 @@ OUTPUT_DIR = (
     PROJECT_ROOT
     / "000_dataset"
     / "_lndb"
-    / "segmentation_dataset"
+    / "007_segmentation_dataset_npy"
 )
 
 # Output directories for CT slices and masks.

@@ -14,7 +14,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 # Directory containing CT volumes (.npy).
 INPUT_DIR = (
     PROJECT_ROOT 
-    / "dataset" 
+    / "000_dataset" 
     / "_lidc" 
     / "001_volume_npy"
 )
@@ -22,9 +22,9 @@ INPUT_DIR = (
 # Directory to save binary lung masks.
 MASK_OUTPUT_DIR = (
     PROJECT_ROOT 
-    / "dataset" 
+    / "000_dataset" 
     / "_lidc" 
-    / "003_volume_parenchyma_npy"
+    / "003_mask_parenchyma_npy"
 )
 
 # Segmentation parameters

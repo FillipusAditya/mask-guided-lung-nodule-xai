@@ -19,22 +19,22 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 CT_INPUT_DIR = (
     PROJECT_ROOT
     / "000_dataset"
-    / "_lidc"
+    / "_lndb"
     / "002_windowed_npy"
 )
 
 MASK_INPUT_DIR = (
     PROJECT_ROOT
     / "000_dataset"
-    / "_lidc"
+    / "_lndb"
     / "005_mask_consensus_npy"
 )
 
 OUTPUT_DIR = (
     PROJECT_ROOT
     / "000_dataset"
-    / "_lidc"
-    / "006_masked_consensus_npy"
+    / "_lndb"
+    / "006_masked_consensus_npy_"
 )
 
 # Existing output files are skipped by default. Set this to True to replace

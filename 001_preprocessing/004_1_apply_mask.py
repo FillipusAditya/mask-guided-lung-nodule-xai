@@ -20,7 +20,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 # Directory containing windowed CT volumes.
 CT_INPUT_DIR = (
     PROJECT_ROOT
-    / "dataset"
+    / "000_dataset"
     / "_lidc"
     / "002_windowed_npy"
 )
@@ -29,17 +29,17 @@ CT_INPUT_DIR = (
 # masks, but it can point to any directory of shape-compatible binary masks.
 MASK_INPUT_DIR = (
     PROJECT_ROOT
-    / "dataset"
+    / "000_dataset"
     / "_lidc"
-    / "003_volume_parenchyma_npy"
+    / "003_mask_parenchyma_npy"
 )
 
 # Directory where masked CT volumes will be stored.
 OUTPUT_DIR = (
     PROJECT_ROOT
-    / "dataset"
+    / "000_dataset"
     / "_lidc"
-    / "004_masked_volume_npy"
+    / "004_volume_parencyma_npy"
 )
 
 

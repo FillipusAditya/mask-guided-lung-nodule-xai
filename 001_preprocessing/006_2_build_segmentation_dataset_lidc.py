@@ -38,7 +38,7 @@ OUTPUT_DIR = (
     PROJECT_ROOT
     / "000_dataset"
     / "_lidc"
-    / "segmentation_dataset"
+    / "007_segmentation_dataset_npy"
 )
 
 # Output directories.

@@ -24,30 +24,32 @@ LIDC_INPUT_DIR = (
     PROJECT_ROOT
     / "000_dataset"
     / "_lidc"
-    / "003_mask_npy"
+    / "005_mask_consensus_npy"
 )
 
-LNDB_INPUT_DIR = (
-    PROJECT_ROOT
-    / "000_dataset"
-    / "_lndb"
-    / "003_mask_npy"
-)
+# LNDB_INPUT_DIR = (
+#     PROJECT_ROOT
+#     / "000_dataset"
+#     / "_lndb"
+#     / "005_mask_consensus_npy"
+# )
 
 # Directories where mask JPG visualizations will be stored.
 LIDC_OUTPUT_DIR = (
     PROJECT_ROOT
     / "000_dataset"
     / "_lidc"
-    / "004_mask_jpg"
+    / "000_jpgs"
+    / "005_mask_consensus_jpg"
 )
 
-LNDB_OUTPUT_DIR = (
-    PROJECT_ROOT
-    / "000_dataset"
-    / "_lndb"
-    / "004_mask_jpg"
-)
+# LNDB_OUTPUT_DIR = (
+#     PROJECT_ROOT
+#     / "000_dataset"
+#     / "_lndb"
+#     / "000_jpgs"
+#     / "005_mask_consensus_jpg"
+# )
 
 def _summarize_unique_values(
     mask: np.ndarray,
@@ -316,12 +318,12 @@ def main() -> None:
         output_dir=LIDC_OUTPUT_DIR,
     )
 
-    print("\nConverting LNDb binary masks...")
+    # print("\nConverting LNDb binary masks...")
 
-    convert_mask_directory(
-        input_dir=LNDB_INPUT_DIR,
-        output_dir=LNDB_OUTPUT_DIR,
-    )
+    # convert_mask_directory(
+    #     input_dir=LNDB_INPUT_DIR,
+    #     output_dir=LNDB_OUTPUT_DIR,
+    # )
 
     print("\nMask JPG conversion completed successfully.")
 

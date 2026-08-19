@@ -21,27 +21,37 @@ from lndb_consensus import (
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 # Directory of ct.mhd
-DATA_DIR = PROJECT_ROOT / "dataset" / "lndb" / "data"
+DATA_DIR = (
+    PROJECT_ROOT 
+    / "000_dataset" 
+    / "lndb" 
+    / "data"
+)
 
 # Directory of mask.mhd
-MASK_DIR = PROJECT_ROOT / "dataset" / "lndb" / "masks"
+MASK_DIR = (
+    PROJECT_ROOT 
+    / "000_dataset" 
+    / "lndb" 
+    / "masks"
+)
 
 # Input CSV
 INPUT_CSV = (
     PROJECT_ROOT 
-    / "dataset" 
+    / "000_dataset" 
     / "_lndb" 
     / "000_metadata" 
-    / "trainNodules_gt_clean_v2.csv"
+    / "002_trainNodules_gt_clean.csv"
 )
 
 # Output CSV
 OUTPUT_CSV = (
     PROJECT_ROOT 
-    / "dataset" 
+    / "000_dataset" 
     / "_lndb" 
     / "000_metadata" 
-    / "consensus_clean.csv"
+    / "003_consensus_clean.csv"
 )
 
 
