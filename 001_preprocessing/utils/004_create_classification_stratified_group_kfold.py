@@ -1,9 +1,10 @@
 """Create reproducible patient-grouped folds for classification training.
 
-The utility reads the existing slice-level ``split_metadata.csv``, keeps the
-current test split as an untouched holdout set, and combines the current train
-and validation splits into one development set. Fold assignment is performed
-on one row per nodule with ``StratifiedGroupKFold``:
+The utility reads the existing slice-level
+``001_holdout_split_lidc_lndb.csv``, keeps the current test split as an
+untouched holdout set, and combines the current train and validation splits
+into one development set. Fold assignment is performed on one row per nodule
+with ``StratifiedGroupKFold``:
 
 * stratification target: source dataset and nodule label;
 * non-overlapping group: source dataset and patient identifier;
@@ -35,7 +36,7 @@ from sklearn.model_selection import StratifiedGroupKFold
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DATASET_DIR = PROJECT_ROOT / "000_dataset" / "_segmentation_dataset_v2"
 
-INPUT_METADATA_CSV = DATASET_DIR / "split_metadata.csv"
+INPUT_METADATA_CSV = DATASET_DIR / "001_holdout_split_lidc_lndb.csv"
 OUTPUT_METADATA_CSV = (
     DATASET_DIR / "classification_cv_5fold_seed42.csv"
 )

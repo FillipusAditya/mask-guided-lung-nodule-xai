@@ -32,7 +32,9 @@ class LungClassificationDataset(Dataset):
         """Initialize a CSV-backed classification dataset split."""
 
         self.root_dir = Path(root_dir)
-        self.metadata_path = self.root_dir / "split_metadata.csv"
+        self.metadata_path = (
+            self.root_dir / "001_holdout_split_lidc_lndb.csv"
+        )
         self.split = split.strip().lower()
         self.ct_path_column = ct_path_column.strip()
         self.transform = transform

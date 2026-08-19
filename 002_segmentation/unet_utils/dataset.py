@@ -49,7 +49,7 @@ class LungDataset(Dataset):
 
         # Load metadata and keep only the requested split.
         self.metadata = pd.read_csv(
-            self.root_dir / "split_metadata.csv"
+            self.root_dir / "001_holdout_split_lidc_lndb.csv"
         )
 
         self.metadata = (

@@ -617,7 +617,9 @@ def main() -> None:
         },
         "data": {
             "dataset_root": str(DATASET_ROOT),
-            "metadata_path": str(DATASET_ROOT / "split_metadata.csv"),
+            "metadata_path": str(
+                DATASET_ROOT / "001_holdout_split_lidc_lndb.csv"
+            ),
             "ct_path_column": CT_PATH_COLUMN,
             "image_height": INPUT_HEIGHT,
             "image_width": INPUT_WIDTH,
