@@ -1,4 +1,4 @@
-"""Run a short learning-rate range test for ResNet-50 feature extraction."""
+"""Run an LR range test while fine-tuning the complete pretrained ResNet-50."""
 
 from collections import Counter
 from datetime import datetime
@@ -9,8 +9,6 @@ from uuid import uuid4
 import warnings
 
 import albumentations as A
-import matplotlib.pyplot as plt
-import numpy as np
 import pandas as pd
 import torch
 import torch.nn as nn
@@ -20,6 +18,7 @@ from torchvision import models
 from torchvision.models import ResNet50_Weights
 from tqdm import tqdm
 
+from ..pretrained_resnet50 import lr_range_test as shared_lr_finder
 from ..utils.dataloader import create_dataloader
 from ..utils.seed import set_seed
 
@@ -32,12 +31,14 @@ RUN_STARTED_AT = datetime.now().astimezone()
 RUN_ID = uuid4()
 RUN_SHORT_ID = RUN_ID.hex[:8]
 RESULT_DIR_NAME = (
-    f"lr_range_test_{RUN_STARTED_AT:%Y%m%d_%H%M%S}_{RUN_SHORT_ID}"
+    "lr_range_test_full_finetuning_"
+    f"{RUN_STARTED_AT:%Y%m%d_%H%M%S}_{RUN_SHORT_ID}"
 )
 OUTPUT_DIR = (
     PROJECT_ROOT
-    / "classification"
-    / "pretrained_resnet50"
+    / "classification_results"
+    / "full_tuning_resnet50"
+    / "lr_range_test"
     / RESULT_DIR_NAME
 )
 FIGURES_DIR = OUTPUT_DIR / "figures"
@@ -47,18 +48,16 @@ SUMMARY_PATH = OUTPUT_DIR / "lr_range_summary.json"
 LR_LOSS_FIGURE_PATH = FIGURES_DIR / "lr_vs_loss.png"
 LR_GRADIENT_FIGURE_PATH = FIGURES_DIR / "lr_loss_gradient.png"
 
+
 # ---------------------------------------------------------------------------
-# Dataset and preprocessing: kept equal to normal feature-extraction training
+# Dataset and preprocessing: equal to the feature-extraction LR range test
 # ---------------------------------------------------------------------------
 DATASET_ROOT = (
     PROJECT_ROOT
     / "000_dataset"
     / "_segmentation_dataset_v2"
 )
-METADATA_PATH = (
-    DATASET_ROOT
-    / "001_holdout_split_lidc_lndb.csv"
-)
+METADATA_PATH = DATASET_ROOT / "001_holdout_split_lidc_lndb.csv"
 CT_PATH_COLUMN = "ct_windowed_path"
 TRAIN_SPLIT = "train"
 INPUT_HEIGHT = 224
@@ -72,9 +71,9 @@ IMAGENET_STD = (0.229, 0.224, 0.225)
 
 
 # ---------------------------------------------------------------------------
-# DataLoader: kept equal to normal feature-extraction training
+# DataLoader: equal to the feature-extraction LR range test
 # ---------------------------------------------------------------------------
-BATCH_SIZE = 64
+BATCH_SIZE = 32
 TRAIN_SHUFFLE = True
 TRAIN_DROP_LAST = False
 NUM_WORKERS = 8
@@ -84,20 +83,22 @@ PIN_MEMORY = torch.cuda.is_available()
 
 
 # ---------------------------------------------------------------------------
-# Model and optimizer: only learning rate varies during this experiment
+# Model and optimizer: every ResNet-50 parameter is trainable
 # ---------------------------------------------------------------------------
 WEIGHTS = ResNet50_Weights.DEFAULT
 MODEL_ARCHITECTURE = "ResNet50"
-TRAINING_STRATEGY = "feature_extraction"
+TRAINING_STRATEGY = "full_fine_tuning"
+TRAINABLE_COMPONENT = "entire_model"
 CLASSIFIER_DROPOUT = 0.3
-WEIGHT_DECAY_OPTM = 1e-4
+MOMENTUM_OPTM = 0.9
+NESTEROV_OPTM = False
 
 
 # ---------------------------------------------------------------------------
 # LR range-test configuration
 # ---------------------------------------------------------------------------
-LR_START = 1e-7
-LR_END = 1e-1
+LR_START = 1e-5
+LR_END = 3e-1
 LR_FINDER_EPOCHS = 2
 LR_FINDER_MAX_ITERATIONS: int | None = None
 LOSS_SMOOTHING_BETA = 0.98
@@ -109,27 +110,19 @@ SEED = 42
 TRANSFORM_SEED = SEED
 
 
-DEVICE = torch.device(
-    "cuda"
-    if torch.cuda.is_available()
-    else "cpu"
-)
-
-RESULT_COLUMNS = [
-    "iteration",
-    "epoch",
-    "batch_index",
-    "learning_rate",
-    "raw_loss",
-    "smoothed_loss",
-    "best_smoothed_loss",
-    "loss_gradient",
-]
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+RESULT_COLUMNS = shared_lr_finder.RESULT_COLUMNS
 
 
 def validate_configuration() -> None:
-    """Validate LR finder constants before allocating training resources."""
+    """Validate full-fine-tuning LR finder constants."""
 
+    if not math.isfinite(MOMENTUM_OPTM) or MOMENTUM_OPTM < 0.0:
+        raise ValueError("MOMENTUM_OPTM must be finite and non-negative.")
+    if not isinstance(NESTEROV_OPTM, bool):
+        raise TypeError("NESTEROV_OPTM must be a boolean.")
+    if NESTEROV_OPTM and MOMENTUM_OPTM <= 0.0:
+        raise ValueError("Nesterov SGD requires positive momentum.")
     if not math.isfinite(LR_START) or LR_START <= 0.0:
         raise ValueError("LR_START must be a finite value greater than zero.")
     if not math.isfinite(LR_END) or LR_END <= LR_START:
@@ -141,58 +134,47 @@ def validate_configuration() -> None:
     if (
         isinstance(LR_FINDER_EPOCHS, bool)
         or not isinstance(LR_FINDER_EPOCHS, int)
+        or LR_FINDER_EPOCHS <= 0
     ):
-        raise TypeError("LR_FINDER_EPOCHS must be an integer.")
-    if LR_FINDER_EPOCHS <= 0:
-        raise ValueError("LR_FINDER_EPOCHS must be greater than zero.")
-    if LR_FINDER_MAX_ITERATIONS is not None:
-        if (
-            isinstance(LR_FINDER_MAX_ITERATIONS, bool)
-            or not isinstance(LR_FINDER_MAX_ITERATIONS, int)
-            or LR_FINDER_MAX_ITERATIONS < 2
-        ):
-            raise ValueError(
-                "LR_FINDER_MAX_ITERATIONS must be None or at least 2."
-            )
-    if (
-        not math.isfinite(LOSS_SMOOTHING_BETA)
-        or not 0.0 <= LOSS_SMOOTHING_BETA < 1.0
+        raise ValueError("LR_FINDER_EPOCHS must be a positive integer.")
+    if LR_FINDER_MAX_ITERATIONS is not None and (
+        isinstance(LR_FINDER_MAX_ITERATIONS, bool)
+        or not isinstance(LR_FINDER_MAX_ITERATIONS, int)
+        or LR_FINDER_MAX_ITERATIONS < 2
     ):
+        raise ValueError(
+            "LR_FINDER_MAX_ITERATIONS must be None or at least 2."
+        )
+    if not 0.0 <= LOSS_SMOOTHING_BETA < 1.0:
         raise ValueError("LOSS_SMOOTHING_BETA must be in [0, 1).")
+    if not math.isfinite(LOSS_SMOOTHING_BETA):
+        raise ValueError("LOSS_SMOOTHING_BETA must be finite.")
     if (
         not math.isfinite(DIVERGENCE_THRESHOLD)
         or DIVERGENCE_THRESHOLD <= 1.0
     ):
         raise ValueError("DIVERGENCE_THRESHOLD must be greater than 1.")
-    if (
-        isinstance(DIVERGENCE_WARMUP_ITERATIONS, bool)
-        or not isinstance(DIVERGENCE_WARMUP_ITERATIONS, int)
-        or DIVERGENCE_WARMUP_ITERATIONS < 0
-    ):
-        raise ValueError(
-            "DIVERGENCE_WARMUP_ITERATIONS must be a non-negative integer."
-        )
-    if (
-        isinstance(GRADIENT_IGNORE_INITIAL_ITERATIONS, bool)
-        or not isinstance(GRADIENT_IGNORE_INITIAL_ITERATIONS, int)
-        or GRADIENT_IGNORE_INITIAL_ITERATIONS < 0
-    ):
-        raise ValueError(
-            "GRADIENT_IGNORE_INITIAL_ITERATIONS must be a non-negative "
-            "integer."
-        )
-    if (
-        isinstance(DIVERGENCE_PROXIMITY_ITERATIONS, bool)
-        or not isinstance(DIVERGENCE_PROXIMITY_ITERATIONS, int)
-        or DIVERGENCE_PROXIMITY_ITERATIONS < 0
-    ):
-        raise ValueError(
-            "DIVERGENCE_PROXIMITY_ITERATIONS must be a non-negative integer."
-        )
+    for name, value in {
+        "DIVERGENCE_WARMUP_ITERATIONS": DIVERGENCE_WARMUP_ITERATIONS,
+        "GRADIENT_IGNORE_INITIAL_ITERATIONS": (
+            GRADIENT_IGNORE_INITIAL_ITERATIONS
+        ),
+        "DIVERGENCE_PROXIMITY_ITERATIONS": (
+            DIVERGENCE_PROXIMITY_ITERATIONS
+        ),
+    }.items():
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, int)
+            or value < 0
+        ):
+            raise ValueError(f"{name} must be a non-negative integer.")
+    if not METADATA_PATH.is_file():
+        raise FileNotFoundError(f"Split metadata not found: {METADATA_PATH}")
 
 
 def build_train_transform() -> A.Compose:
-    """Build the same stochastic preprocessing used by normal training."""
+    """Build the stochastic preprocessing used by the existing LR finder."""
 
     return A.Compose(
         [
@@ -204,10 +186,7 @@ def build_train_transform() -> A.Compose:
                 contrast_limit=0.10,
                 p=0.3,
             ),
-            A.GaussNoise(
-                std_range=(0.01, 0.03),
-                p=0.2,
-            ),
+            A.GaussNoise(std_range=(0.01, 0.03), p=0.2),
             A.Normalize(
                 mean=IMAGENET_MEAN,
                 std=IMAGENET_STD,
@@ -220,7 +199,7 @@ def build_train_transform() -> A.Compose:
 
 
 def build_train_loader(transform: A.Compose) -> DataLoader:
-    """Create the normal training split DataLoader for the range test."""
+    """Create the same training-split DataLoader as the existing LR finder."""
 
     return create_dataloader(
         root_dir=DATASET_ROOT,
@@ -240,7 +219,7 @@ def build_train_loader(transform: A.Compose) -> DataLoader:
 
 
 def build_model() -> nn.Module:
-    """Build pretrained ResNet-50 with only its classifier trainable."""
+    """Build pretrained ResNet-50 with every parameter trainable."""
 
     model = models.resnet50(weights=WEIGHTS)
     classifier_input_features = model.fc.in_features
@@ -253,63 +232,83 @@ def build_model() -> nn.Module:
     )
 
     for parameter in model.parameters():
-        parameter.requires_grad = False
-    for parameter in model.fc.parameters():
         parameter.requires_grad = True
 
+    assert_full_model_trainable(model)
     return model.to(DEVICE)
 
 
-def set_feature_extraction_mode(model: nn.Module) -> None:
-    """Freeze backbone behavior while keeping classifier Dropout active."""
+def assert_full_model_trainable(model: nn.Module) -> None:
+    """Reject a model containing parameters excluded from full fine-tuning."""
 
-    model.eval()
-    model.fc.train()
+    named_parameters = list(model.named_parameters())
+    if not named_parameters:
+        raise RuntimeError("The model does not contain parameters.")
 
-    trainable_parameter_names = [
+    frozen_parameter_names = [
         name
-        for name, parameter in model.named_parameters()
-        if parameter.requires_grad
+        for name, parameter in named_parameters
+        if not parameter.requires_grad
     ]
-    if not trainable_parameter_names:
-        raise RuntimeError("The model does not contain trainable parameters.")
-    if any(
-        not name.startswith("fc.")
-        for name in trainable_parameter_names
-    ):
+    if frozen_parameter_names:
         raise RuntimeError(
-            "Feature-extraction range test expects only fc parameters to be "
-            f"trainable, found: {trainable_parameter_names}"
+            "Full fine-tuning requires every parameter to be trainable; "
+            f"frozen parameters found: {frozen_parameter_names}"
         )
 
-    training_batch_norm_layers = [
+
+def set_full_fine_tuning_mode(model: nn.Module) -> None:
+    """Enable training behavior for the backbone, BatchNorm, and classifier."""
+
+    model.train()
+    assert_full_model_trainable(model)
+
+    batch_norm_layers = [
         module
         for module in model.modules()
         if isinstance(module, nn.modules.batchnorm._BatchNorm)
-        and module.training
     ]
-    if training_batch_norm_layers:
+    if not batch_norm_layers:
+        raise RuntimeError("ResNet-50 should contain BatchNorm layers.")
+    if any(not module.training for module in batch_norm_layers):
         raise RuntimeError(
-            "Backbone BatchNorm layers must remain in evaluation mode."
+            "Full fine-tuning requires every BatchNorm layer in train mode."
         )
+    if not model.fc.training:
+        raise RuntimeError("Classifier Dropout must remain active.")
 
 
-def build_optimizer(model: nn.Module) -> torch.optim.AdamW:
-    """Create AdamW for classifier parameters at the starting LR."""
+def build_optimizer(model: nn.Module) -> torch.optim.SGD:
+    """Create SGD with momentum over the entire model at the starting LR."""
 
     trainable_parameters = [
         parameter
-        for parameter in model.fc.parameters()
+        for parameter in model.parameters()
         if parameter.requires_grad
     ]
-    if not trainable_parameters:
-        raise RuntimeError("Classifier does not contain trainable parameters.")
+    all_parameters = list(model.parameters())
+    if len(trainable_parameters) != len(all_parameters):
+        raise RuntimeError(
+            "Optimizer construction found parameters excluded from training."
+        )
 
-    return torch.optim.AdamW(
+    optimizer = torch.optim.SGD(
         params=trainable_parameters,
         lr=LR_START,
-        weight_decay=WEIGHT_DECAY_OPTM,
+        momentum=MOMENTUM_OPTM,
+        nesterov=NESTEROV_OPTM,
     )
+    optimized_parameter_ids = {
+        id(parameter)
+        for group in optimizer.param_groups
+        for parameter in group["params"]
+    }
+    model_parameter_ids = {id(parameter) for parameter in all_parameters}
+    if optimized_parameter_ids != model_parameter_ids:
+        raise RuntimeError(
+            "SGD must optimize every full-fine-tuning model parameter."
+        )
+    return optimizer
 
 
 def resolve_iteration_counts(
@@ -328,10 +327,7 @@ def resolve_iteration_counts(
         else full_iterations
     )
     if planned_iterations < 2:
-        raise ValueError(
-            "LR Range Test requires at least two optimizer iterations."
-        )
-
+        raise ValueError("LR Range Test requires at least two iterations.")
     return full_iterations, planned_iterations
 
 
@@ -355,11 +351,11 @@ def build_config(
     train_loader: DataLoader,
     train_transform: A.Compose,
     model: nn.Module,
-    optimizer: torch.optim.AdamW,
+    optimizer: torch.optim.SGD,
     full_iterations: int,
     planned_iterations: int,
 ) -> dict[str, object]:
-    """Build a reproducibility snapshot for the LR range experiment."""
+    """Build a reproducibility snapshot for full-network LR finding."""
 
     dataset = train_loader.dataset
     class_counts = Counter(dataset.targets)
@@ -368,24 +364,26 @@ def build_config(
 
     return {
         "experiment": {
-            "type": "learning_rate_range_test",
+            "type": "learning_rate_range_test_full_fine_tuning",
             "run_id": str(RUN_ID),
             "short_run_id": RUN_SHORT_ID,
             "result_directory": RESULT_DIR_NAME,
             "output_directory": str(OUTPUT_DIR),
             "created_at": RUN_STARTED_AT.isoformat(timespec="seconds"),
             "purpose": (
-                "Identify a reasonable learning-rate region; this is not "
-                "final model training."
+                "Identify a reasonable learning-rate region for full "
+                "pretrained ResNet-50 fine-tuning; this is not final model "
+                "training."
             ),
         },
         "model": {
             "architecture": MODEL_ARCHITECTURE,
             "pretrained_weights": str(WEIGHTS),
             "training_strategy": TRAINING_STRATEGY,
-            "backbone_frozen": True,
-            "batch_norm_frozen": True,
-            "trainable_component": "fc",
+            "backbone_frozen": False,
+            "batch_norm_frozen": False,
+            "batch_norm_mode": "train",
+            "trainable_component": TRAINABLE_COMPONENT,
             "classifier": {
                 "architecture": "dropout_linear",
                 "dropout_probability": CLASSIFIER_DROPOUT,
@@ -394,11 +392,6 @@ def build_config(
             "total_parameters": parameter_counts["total"],
             "trainable_parameters": parameter_counts["trainable"],
             "frozen_parameters": parameter_counts["frozen"],
-            "trainable_parameter_names": [
-                name
-                for name, parameter in model.named_parameters()
-                if parameter.requires_grad
-            ],
         },
         "data": {
             "dataset_root": str(DATASET_ROOT),
@@ -431,13 +424,15 @@ def build_config(
         },
         "optimizer": {
             "name": optimizer.__class__.__name__,
+            "optimized_parameter_scope": "entire_model",
             "start_learning_rate": LR_START,
             "end_learning_rate": LR_END,
             "progression": "exponential_per_iteration",
             "weight_decay": optimizer_group["weight_decay"],
-            "betas": optimizer_group["betas"],
-            "eps": optimizer_group["eps"],
-            "amsgrad": optimizer_group["amsgrad"],
+            "weight_decay_enabled": False,
+            "momentum": optimizer_group["momentum"],
+            "dampening": optimizer_group["dampening"],
+            "nesterov": optimizer_group["nesterov"],
         },
         "loss": {
             "name": "CrossEntropyLoss",
@@ -450,8 +445,7 @@ def build_config(
             "full_iterations": full_iterations,
             "planned_iterations": planned_iterations,
             "lr_multiplier": (
-                (LR_END / LR_START)
-                ** (1.0 / (planned_iterations - 1))
+                (LR_END / LR_START) ** (1.0 / (planned_iterations - 1))
             ),
             "loss_smoothing_beta": LOSS_SMOOTHING_BETA,
             "divergence_threshold": DIVERGENCE_THRESHOLD,
@@ -491,13 +485,9 @@ def build_config(
 def save_json(data: dict[str, object], output_path: Path) -> None:
     """Save a standards-compliant JSON document."""
 
-    with open(output_path, "w") as file:
-        json.dump(
-            data,
-            file,
-            indent=4,
-            allow_nan=False,
-        )
+    with output_path.open("w", encoding="utf-8") as file:
+        json.dump(data, file, indent=4, allow_nan=False)
+        file.write("\n")
 
 
 def set_optimizer_learning_rate(
@@ -513,17 +503,16 @@ def set_optimizer_learning_rate(
 def run_lr_range_test(
     model: nn.Module,
     train_loader: DataLoader,
-    optimizer: torch.optim.AdamW,
+    optimizer: torch.optim.SGD,
     criterion: nn.Module,
     planned_iterations: int,
     full_iterations: int,
 ) -> tuple[pd.DataFrame, dict[str, object]]:
-    """Increase LR per batch and record raw and bias-corrected EMA loss."""
+    """Increase LR per batch while updating the complete ResNet-50 model."""
 
-    set_feature_extraction_mode(model)
+    set_full_fine_tuning_mode(model)
     lr_multiplier = (
-        (LR_END / LR_START)
-        ** (1.0 / (planned_iterations - 1))
+        (LR_END / LR_START) ** (1.0 / (planned_iterations - 1))
     )
     running_average_loss = 0.0
     best_smoothed_loss = float("inf")
@@ -535,10 +524,9 @@ def run_lr_range_test(
 
     progress_bar = tqdm(
         total=planned_iterations,
-        desc="LR Range Test",
+        desc="Full Fine-Tuning LR Range Test",
         unit="batch",
     )
-
     should_stop = False
     for epoch_index in range(LR_FINDER_EPOCHS):
         for batch_index, (images, labels) in enumerate(train_loader):
@@ -547,23 +535,13 @@ def run_lr_range_test(
                 should_stop = True
                 break
 
-            current_lr = (
-                LR_START
-                * lr_multiplier ** (iteration - 1)
-            )
+            current_lr = LR_START * lr_multiplier ** (iteration - 1)
             if iteration == planned_iterations:
-                # Avoid floating-point drift at the upper endpoint.
                 current_lr = LR_END
             set_optimizer_learning_rate(optimizer, current_lr)
 
-            images = images.to(
-                DEVICE,
-                non_blocking=PIN_MEMORY,
-            )
-            labels = labels.to(
-                DEVICE,
-                non_blocking=PIN_MEMORY,
-            )
+            images = images.to(DEVICE, non_blocking=PIN_MEMORY)
+            labels = labels.to(DEVICE, non_blocking=PIN_MEMORY)
             optimizer.zero_grad(set_to_none=True)
             logits = model(images)
             loss = criterion(logits, labels)
@@ -575,8 +553,9 @@ def run_lr_range_test(
                 failed_iteration = iteration
                 should_stop = True
                 warnings.warn(
-                    "LR Range Test stopped because loss became non-finite "
-                    f"at iteration {iteration}, LR={current_lr:.6e}."
+                    "Full fine-tuning LR Range Test stopped because loss "
+                    "became non-finite at iteration "
+                    f"{iteration}, LR={current_lr:.6e}."
                 )
                 break
 
@@ -587,14 +566,9 @@ def run_lr_range_test(
                 LOSS_SMOOTHING_BETA * running_average_loss
                 + (1.0 - LOSS_SMOOTHING_BETA) * raw_loss
             )
-            smoothed_loss = (
-                running_average_loss
-                / (
-                    1.0
-                    - LOSS_SMOOTHING_BETA ** iteration
-                )
+            smoothed_loss = running_average_loss / (
+                1.0 - LOSS_SMOOTHING_BETA**iteration
             )
-
             previous_best = best_smoothed_loss
             divergence_detected = (
                 iteration > DIVERGENCE_WARMUP_ITERATIONS
@@ -602,20 +576,19 @@ def run_lr_range_test(
                 and smoothed_loss
                 > previous_best * DIVERGENCE_THRESHOLD
             )
-            best_smoothed_loss = min(
-                best_smoothed_loss,
-                smoothed_loss,
-            )
+            best_smoothed_loss = min(best_smoothed_loss, smoothed_loss)
 
-            records.append({
-                "iteration": iteration,
-                "epoch": epoch_index + 1,
-                "batch_index": batch_index + 1,
-                "learning_rate": current_lr,
-                "raw_loss": raw_loss,
-                "smoothed_loss": smoothed_loss,
-                "best_smoothed_loss": best_smoothed_loss,
-            })
+            records.append(
+                {
+                    "iteration": iteration,
+                    "epoch": epoch_index + 1,
+                    "batch_index": batch_index + 1,
+                    "learning_rate": current_lr,
+                    "raw_loss": raw_loss,
+                    "smoothed_loss": smoothed_loss,
+                    "best_smoothed_loss": best_smoothed_loss,
+                }
+            )
             progress_bar.update(1)
             progress_bar.set_postfix(
                 lr=f"{current_lr:.3e}",
@@ -641,18 +614,15 @@ def run_lr_range_test(
                 else:
                     stop_reason = "completed_lr_range"
                 break
-
         if should_stop:
             break
 
     progress_bar.close()
-
     results = pd.DataFrame(records)
     for column in RESULT_COLUMNS:
         if column not in results:
             results[column] = pd.Series(dtype=float)
     results = results[RESULT_COLUMNS]
-
     run_state: dict[str, object] = {
         "stop_reason": stop_reason,
         "stop_lr": stop_lr,
@@ -663,323 +633,44 @@ def run_lr_range_test(
     return results, run_state
 
 
-def _finite_float(value: float | np.floating | None) -> float | None:
-    """Convert one finite numeric value to JSON-safe float or return None."""
-
-    if value is None:
-        return None
-    converted = float(value)
-    return converted if math.isfinite(converted) else None
-
-
 def compute_lr_diagnostics(
     results: pd.DataFrame,
     run_state: dict[str, object],
     planned_iterations: int,
 ) -> tuple[pd.DataFrame, dict[str, object]]:
-    """Compute LR-loss gradient and transparent candidate-region heuristics."""
+    """Reuse the existing diagnostics with this program's configuration."""
 
-    analyzed = results.copy()
-    analyzed["loss_gradient"] = np.nan
-    executed_iterations = len(analyzed)
-    warning_message: str | None = None
-    minimum_loss_lr: float | None = None
-    minimum_smoothed_loss: float | None = None
-    minimum_index: int | None = None
-    steepest_descent_lr: float | None = None
-    steepest_gradient: float | None = None
-    steepest_index: int | None = None
-
-    if executed_iterations > 0:
-        learning_rates = analyzed["learning_rate"].to_numpy(dtype=float)
-        smoothed_losses = analyzed["smoothed_loss"].to_numpy(dtype=float)
-        finite_mask = np.isfinite(learning_rates) & np.isfinite(smoothed_losses)
-
-        if not finite_mask.all():
-            raise ValueError(
-                "Recorded LR and smoothed-loss values must all be finite."
-            )
-
-        analysis_start_index = min(
-            GRADIENT_IGNORE_INITIAL_ITERATIONS,
-            executed_iterations - 1,
-        )
-        eligible_indices = np.arange(
-            analysis_start_index,
-            executed_iterations,
-        )
-        eligible_losses = smoothed_losses[eligible_indices]
-        minimum_index = int(
-            eligible_indices[int(np.argmin(eligible_losses))]
-        )
-        minimum_loss_lr = float(learning_rates[minimum_index])
-        minimum_smoothed_loss = float(smoothed_losses[minimum_index])
-
-        if executed_iterations >= 3 and len(eligible_indices) >= 3:
-            log_learning_rates = np.log10(learning_rates)
-            gradients = np.gradient(
-                smoothed_losses,
-                log_learning_rates,
-            )
-            analyzed["loss_gradient"] = gradients
-            eligible_gradients = gradients[eligible_indices]
-            steepest_index = int(
-                eligible_indices[int(np.argmin(eligible_gradients))]
-            )
-            steepest_descent_lr = float(
-                learning_rates[steepest_index]
-            )
-            steepest_gradient = float(gradients[steepest_index])
-        else:
-            warning_message = (
-                "Too few post-warmup observations to estimate the loss "
-                "gradient reliably. Inspect lr_vs_loss.png manually."
-            )
-    else:
-        analysis_start_index = None
-        warning_message = (
-            "No finite optimizer iteration was recorded; LR diagnostics "
-            "could not be computed."
-        )
-
-    divergence_lr = _finite_float(run_state.get("divergence_lr"))
-    lr_before_divergence: float | None = None
-    if divergence_lr is not None and executed_iterations >= 2:
-        lr_before_divergence = float(
-            analyzed.iloc[-2]["learning_rate"]
-        )
-
-    minimum_near_divergence = False
-    if divergence_lr is not None and minimum_index is not None:
-        divergence_index = executed_iterations - 1
-        minimum_near_divergence = (
-            divergence_index - minimum_index
-            <= DIVERGENCE_PROXIMITY_ITERATIONS
-        )
-
-    minimum_at_last_iteration = (
-        minimum_index is not None
-        and minimum_index == executed_iterations - 1
+    diagnostic_names = (
+        "LR_START",
+        "LR_END",
+        "GRADIENT_IGNORE_INITIAL_ITERATIONS",
+        "DIVERGENCE_PROXIMITY_ITERATIONS",
     )
-
-    candidate_lower: float | None = None
-    candidate_upper: float | None = None
-    candidate_explanation = (
-        "Candidate bounds are reported only when the post-warmup steepest-"
-        "descent LR occurs before the post-warmup minimum-loss LR. The region "
-        "is a diagnostic heuristic, not a guaranteed optimal interval."
-    )
-    if (
-        steepest_index is not None
-        and minimum_index is not None
-        and steepest_index < minimum_index
-        and not minimum_at_last_iteration
-    ):
-        candidate_lower = steepest_descent_lr
-        candidate_upper = minimum_loss_lr
-
-    if minimum_near_divergence:
-        proximity_note = (
-            " The minimum loss occurred within "
-            f"{DIVERGENCE_PROXIMITY_ITERATIONS} iterations of detected "
-            "divergence, so the upper bound should be interpreted cautiously."
-        )
-        candidate_explanation += proximity_note
-    if minimum_at_last_iteration:
-        candidate_explanation += (
-            " The minimum occurred at the last recorded iteration, so this "
-            "test did not bracket the minimum and no candidate upper bound "
-            "is reported automatically."
-        )
-
-    initial_smoothed_loss = (
-        _finite_float(analyzed.iloc[0]["smoothed_loss"])
-        if executed_iterations > 0
-        else None
-    )
-    last_lr = (
-        _finite_float(analyzed.iloc[-1]["learning_rate"])
-        if executed_iterations > 0
-        else None
-    )
-
-    summary: dict[str, object] = {
-        "executed_iterations": executed_iterations,
-        "planned_iterations": planned_iterations,
-        "stop_reason": run_state["stop_reason"],
-        "failed_iteration": run_state["failed_iteration"],
-        "start_lr": LR_START,
-        "configured_end_lr": LR_END,
-        "last_lr": last_lr,
-        "stop_lr": _finite_float(run_state.get("stop_lr")),
-        "initial_smoothed_loss": initial_smoothed_loss,
-        "minimum_smoothed_loss": minimum_smoothed_loss,
-        "minimum_loss_lr": minimum_loss_lr,
-        "steepest_descent_lr": steepest_descent_lr,
-        "steepest_loss_gradient": steepest_gradient,
-        "divergence_detected": divergence_lr is not None,
-        "divergence_lr": divergence_lr,
-        "lr_before_divergence": lr_before_divergence,
-        "candidate_lr_lower": candidate_lower,
-        "candidate_lr_upper": candidate_upper,
-        "candidate_region_available": (
-            candidate_lower is not None
-            and candidate_upper is not None
-        ),
-        "candidate_region_heuristic": candidate_explanation,
-        "analysis_ignored_initial_iterations": (
+    previous_values = {
+        name: getattr(shared_lr_finder, name)
+        for name in diagnostic_names
+    }
+    replacement_values = {
+        "LR_START": LR_START,
+        "LR_END": LR_END,
+        "GRADIENT_IGNORE_INITIAL_ITERATIONS": (
             GRADIENT_IGNORE_INITIAL_ITERATIONS
         ),
-        "analysis_start_iteration": (
-            analysis_start_index + 1
-            if analysis_start_index is not None
-            else None
+        "DIVERGENCE_PROXIMITY_ITERATIONS": (
+            DIVERGENCE_PROXIMITY_ITERATIONS
         ),
-        "minimum_loss_near_divergence": minimum_near_divergence,
-        "minimum_loss_at_last_iteration": minimum_at_last_iteration,
-        "analysis_warning": warning_message,
-        "model_artifact_saved": False,
     }
-    return analyzed, summary
-
-
-def plot_lr_vs_loss(
-    results: pd.DataFrame,
-    summary: dict[str, object],
-    output_path: Path,
-) -> None:
-    """Plot raw and smoothed training loss against logarithmic LR."""
-
-    figure, axis = plt.subplots(figsize=(10, 6))
-    if results.empty:
-        axis.text(
-            0.5,
-            0.5,
-            "No finite LR-loss observations were recorded.",
-            ha="center",
-            va="center",
-            transform=axis.transAxes,
+    try:
+        for name, value in replacement_values.items():
+            setattr(shared_lr_finder, name, value)
+        return shared_lr_finder.compute_lr_diagnostics(
+            results=results,
+            run_state=run_state,
+            planned_iterations=planned_iterations,
         )
-    else:
-        axis.plot(
-            results["learning_rate"],
-            results["raw_loss"],
-            color="tab:gray",
-            alpha=0.30,
-            linewidth=1.0,
-            label="Raw batch loss",
-        )
-        axis.plot(
-            results["learning_rate"],
-            results["smoothed_loss"],
-            color="tab:blue",
-            linewidth=2.0,
-            label="Bias-corrected smoothed loss",
-        )
-
-        candidate_lower = summary["candidate_lr_lower"]
-        candidate_upper = summary["candidate_lr_upper"]
-        if candidate_lower is not None and candidate_upper is not None:
-            axis.axvspan(
-                candidate_lower,
-                candidate_upper,
-                color="tab:green",
-                alpha=0.12,
-                label="Candidate reasonable LR region",
-            )
-
-        markers = [
-            (
-                summary["steepest_descent_lr"],
-                "Steepest descent LR",
-                "tab:green",
-            ),
-            (
-                summary["minimum_loss_lr"],
-                "Minimum-loss LR",
-                "tab:orange",
-            ),
-            (
-                summary["divergence_lr"],
-                "Divergence LR",
-                "tab:red",
-            ),
-        ]
-        for learning_rate, label, color in markers:
-            if learning_rate is not None:
-                axis.axvline(
-                    learning_rate,
-                    color=color,
-                    linestyle="--",
-                    linewidth=1.4,
-                    label=label,
-                )
-
-    axis.set_xscale("log")
-    axis.set_title("LR Range Test: Learning Rate vs Training Loss")
-    axis.set_xlabel("Learning Rate (log scale)")
-    axis.set_ylabel("Cross-Entropy Loss")
-    axis.grid(True, which="both", alpha=0.25)
-    handles, labels = axis.get_legend_handles_labels()
-    if handles:
-        axis.legend()
-    figure.tight_layout()
-    figure.savefig(output_path, dpi=300, bbox_inches="tight")
-    plt.close(figure)
-
-
-def plot_lr_loss_gradient(
-    results: pd.DataFrame,
-    summary: dict[str, object],
-    output_path: Path,
-) -> None:
-    """Plot loss derivative with respect to log10 learning rate."""
-
-    figure, axis = plt.subplots(figsize=(10, 6))
-    valid_gradient = (
-        results["loss_gradient"].notna()
-        if "loss_gradient" in results
-        else pd.Series(dtype=bool)
-    )
-    if not results.empty and valid_gradient.any():
-        axis.plot(
-            results.loc[valid_gradient, "learning_rate"],
-            results.loc[valid_gradient, "loss_gradient"],
-            color="tab:purple",
-            linewidth=1.8,
-            label="Loss gradient",
-        )
-        steepest_lr = summary["steepest_descent_lr"]
-        if steepest_lr is not None:
-            axis.axvline(
-                steepest_lr,
-                color="tab:green",
-                linestyle="--",
-                linewidth=1.5,
-                label="Steepest descent LR",
-            )
-    else:
-        axis.text(
-            0.5,
-            0.5,
-            "Insufficient observations for reliable gradient analysis.",
-            ha="center",
-            va="center",
-            transform=axis.transAxes,
-        )
-
-    axis.axhline(0.0, color="black", linewidth=0.8, alpha=0.5)
-    axis.set_xscale("log")
-    axis.set_title("LR Range Test: Smoothed-Loss Gradient")
-    axis.set_xlabel("Learning Rate (log scale)")
-    axis.set_ylabel("d(smoothed loss) / d(log10(LR))")
-    axis.grid(True, which="both", alpha=0.25)
-    handles, labels = axis.get_legend_handles_labels()
-    if handles:
-        axis.legend()
-    figure.tight_layout()
-    figure.savefig(output_path, dpi=300, bbox_inches="tight")
-    plt.close(figure)
+    finally:
+        for name, value in previous_values.items():
+            setattr(shared_lr_finder, name, value)
 
 
 def print_experiment_header(
@@ -987,21 +678,27 @@ def print_experiment_header(
     train_loader: DataLoader,
     planned_iterations: int,
 ) -> None:
-    """Print the configuration most relevant to interpreting LR results."""
+    """Print the configuration relevant to interpreting the experiment."""
 
     print()
-    print("=" * 64)
-    print("Learning Rate Range Test")
-    print("=" * 64)
+    print("=" * 72)
+    print("Full Fine-Tuning Learning Rate Range Test")
+    print("=" * 72)
     print(f"Model                : {MODEL_ARCHITECTURE}")
+    print(f"Pretrained weights   : {WEIGHTS}")
     print(f"Training strategy    : {TRAINING_STRATEGY}")
+    print(f"Trainable component  : {TRAINABLE_COMPONENT}")
+    print(f"BatchNorm mode       : train")
     print(f"CT path column       : {CT_PATH_COLUMN}")
     print(f"Training samples     : {len(train_loader.dataset)}")
     print(f"Batches per epoch    : {len(train_loader)}")
     print(f"Planned iterations   : {planned_iterations}")
     print(f"LR range             : {LR_START:.2e} -> {LR_END:.2e}")
     print(f"Batch size           : {BATCH_SIZE}")
-    print(f"Weight decay         : {WEIGHT_DECAY_OPTM:.2e}")
+    print(f"Optimizer            : SGD")
+    print(f"Momentum             : {MOMENTUM_OPTM:.1f}")
+    print(f"Nesterov             : {NESTEROV_OPTM}")
+    print("Weight decay         : disabled (0.0)")
     print(f"Total parameters     : {parameter_counts['total']:,}")
     print(f"Trainable parameters : {parameter_counts['trainable']:,}")
     print(f"Frozen parameters    : {parameter_counts['frozen']:,}")
@@ -1010,19 +707,15 @@ def print_experiment_header(
 
 
 def print_summary(summary: dict[str, object]) -> None:
-    """Print machine-summary highlights without claiming a final LR."""
+    """Print summary highlights without claiming a final learning rate."""
 
     def format_lr(value: object) -> str:
-        return (
-            f"{float(value):.6e}"
-            if value is not None
-            else "Not available"
-        )
+        return f"{float(value):.6e}" if value is not None else "Not available"
 
     print()
-    print("=" * 64)
-    print("LR Range Test Complete")
-    print("=" * 64)
+    print("=" * 72)
+    print("Full Fine-Tuning LR Range Test Complete")
+    print("=" * 72)
     print(f"Executed iterations : {summary['executed_iterations']}")
     print(f"Stop reason         : {summary['stop_reason']}")
     print(
@@ -1045,7 +738,6 @@ def print_summary(summary: dict[str, object]) -> None:
         )
     else:
         print("  Unable to determine reliably. Inspect lr_vs_loss.png.")
-
     if summary["minimum_loss_near_divergence"]:
         print(
             "Warning: minimum loss is close to detected divergence; "
@@ -1063,7 +755,7 @@ def print_summary(summary: dict[str, object]) -> None:
 
 
 def main() -> None:
-    """Run the complete short LR range experiment and save diagnostics."""
+    """Run the full-network LR range experiment and save diagnostics."""
 
     validate_configuration()
     set_seed(seed=SEED, deterministic=True)
@@ -1073,7 +765,7 @@ def main() -> None:
         train_loader
     )
     model = build_model()
-    set_feature_extraction_mode(model)
+    set_full_fine_tuning_mode(model)
     optimizer = build_optimizer(model)
     criterion = nn.CrossEntropyLoss()
     parameter_counts = get_parameter_counts(model)
@@ -1108,18 +800,14 @@ def main() -> None:
         run_state=run_state,
         planned_iterations=planned_iterations,
     )
-    results.to_csv(
-        RESULTS_PATH,
-        index=False,
-        float_format="%.12e",
-    )
+    results.to_csv(RESULTS_PATH, index=False, float_format="%.12e")
     save_json(summary, SUMMARY_PATH)
-    plot_lr_vs_loss(
+    shared_lr_finder.plot_lr_vs_loss(
         results=results,
         summary=summary,
         output_path=LR_LOSS_FIGURE_PATH,
     )
-    plot_lr_loss_gradient(
+    shared_lr_finder.plot_lr_loss_gradient(
         results=results,
         summary=summary,
         output_path=LR_GRADIENT_FIGURE_PATH,
@@ -1129,3 +817,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
