@@ -38,3 +38,7 @@ Thumbs.db
 # Result
 002_segmentation/*/result_*/
 classification
+classification_results
+
+# txt
+small_notes.txt
