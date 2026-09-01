@@ -18,7 +18,8 @@ from torch.utils.data import DataLoader
 from torchvision import models
 from tqdm import tqdm
 
-from classification.utils import (
+from ..utils import (
+    binary_probabilities_to_predictions,
     compute_auc,
     compute_classification_metrics,
     create_dataloader,
@@ -72,8 +73,12 @@ class SimpleGradCAM:
         self,
         model: nn.Module,
         target_layer: nn.Module,
+        classification_threshold: float,
+        positive_class_index: int,
     ) -> None:
         self.model = model
+        self.classification_threshold = classification_threshold
+        self.positive_class_index = positive_class_index
         self.activations: torch.Tensor | None = None
         self.gradients: torch.Tensor | None = None
         self.hook = target_layer.register_forward_hook(
@@ -107,7 +112,11 @@ class SimpleGradCAM:
         images = images.requires_grad_(True)
         logits = self.model(images)
         probabilities = torch.softmax(logits, dim=1)
-        predictions = probabilities.argmax(dim=1)
+        predictions = binary_probabilities_to_predictions(
+            probabilities=probabilities,
+            threshold=self.classification_threshold,
+            positive_class_index=self.positive_class_index,
+        )
 
         if class_indices is None:
             class_indices = predictions
@@ -234,6 +243,8 @@ def generate_gradcam_visualizations(
     device: torch.device,
     figure_output_dir: Path,
     heatmap_output_dir: Path,
+    classification_threshold: float,
+    positive_class_index: int,
 ) -> int:
     """Generate Grad-CAM figures and NumPy heatmaps for all test samples."""
 
@@ -243,6 +254,8 @@ def generate_gradcam_visualizations(
     gradcam = SimpleGradCAM(
         model=model,
         target_layer=model.layer4[-1],
+        classification_threshold=classification_threshold,
+        positive_class_index=positive_class_index,
     )
     sample_index = 0
 
@@ -335,19 +348,26 @@ def create_test_transform(
     """Create the deterministic preprocessing used for test inference."""
 
     data_config = training_config["data"]
+    training_seed = training_config.get("training", {}).get("seed", 42)
+    transform_seed = int(
+        data_config.get("transform_seed", training_seed)
+    )
 
-    return A.Compose([
-        A.Resize(
-            height=int(data_config["image_height"]),
-            width=int(data_config["image_width"]),
-        ),
-        A.Normalize(
-            mean=tuple(data_config["normalization_mean"]),
-            std=tuple(data_config["normalization_std"]),
-            max_pixel_value=1.0,
-        ),
-        ToTensorV2(),
-    ])
+    return A.Compose(
+        [
+            A.Resize(
+                height=int(data_config["image_height"]),
+                width=int(data_config["image_width"]),
+            ),
+            A.Normalize(
+                mean=tuple(data_config["normalization_mean"]),
+                std=tuple(data_config["normalization_std"]),
+                max_pixel_value=1.0,
+            ),
+            ToTensorV2(),
+        ],
+        seed=transform_seed,
+    )
 
 
 def build_model(
@@ -371,10 +391,29 @@ def build_model(
 
     num_classes = int(model_config["num_classes"])
     model = models.resnet50(weights=None)
-    model.fc = nn.Linear(
-        in_features=model.fc.in_features,
-        out_features=num_classes,
-    )
+    classifier_config = model_config.get("classifier")
+
+    if classifier_config is None:
+        # Backward compatibility with runs that used a linear head.
+        model.fc = nn.Linear(
+            in_features=model.fc.in_features,
+            out_features=num_classes,
+        )
+    elif classifier_config["architecture"] == "dropout_linear":
+        model.fc = nn.Sequential(
+            nn.Dropout(
+                p=float(classifier_config["dropout_probability"]),
+            ),
+            nn.Linear(
+                in_features=model.fc.in_features,
+                out_features=num_classes,
+            ),
+        )
+    else:
+        raise ValueError(
+            "Unsupported classifier architecture: "
+            f"{classifier_config['architecture']}"
+        )
 
     state_dict = torch.load(
         weights_path,
@@ -393,6 +432,8 @@ def evaluate(
     criterion: nn.Module,
     device: torch.device,
     num_classes: int,
+    classification_threshold: float,
+    positive_class_index: int,
 ) -> tuple[
     dict[str, float],
     torch.Tensor,
@@ -435,7 +476,11 @@ def evaluate(
             logits = model(images)
             loss = criterion(logits, labels)
             probabilities = torch.softmax(logits, dim=1)
-            predictions = probabilities.argmax(dim=1)
+            predictions = binary_probabilities_to_predictions(
+                probabilities=probabilities,
+                threshold=classification_threshold,
+                positive_class_index=positive_class_index,
+            )
 
             running_loss += loss.item() * labels.size(0)
             total_samples += labels.size(0)
@@ -527,6 +572,8 @@ def build_test_results(
     metrics: dict[str, float],
     confusion_matrix: torch.Tensor,
     test_time_sec: float,
+    classification_threshold: float,
+    positive_class_index: int,
 ) -> dict[str, object]:
     """Build the serializable test-results document."""
 
@@ -582,6 +629,11 @@ def build_test_results(
             "class_distribution": class_distribution,
         },
         "metrics": metrics,
+        "prediction": {
+            "classification_threshold": classification_threshold,
+            "positive_class_index": positive_class_index,
+            "positive_class_name": dataset.classes[positive_class_index],
+        },
         "confusion_matrix": confusion_result,
         "runtime": {
             "test_time_sec": test_time_sec,
@@ -624,6 +676,10 @@ def print_test_results(
     print(f"Precision           : {metrics['precision']:.4f}")
     print(f"F1-score            : {metrics['f1_score']:.4f}")
     print(f"ROC AUC             : {metrics['auc']:.4f}")
+    print(
+        f"Decision Threshold  : "
+        f"{results['prediction']['classification_threshold']:.4f}"
+    )
 
     if "true_positive" in confusion:
         print()
@@ -649,6 +705,7 @@ def main() -> None:
     training_config = load_training_config(TRAINING_CONFIG_PATH)
     data_config = training_config["data"]
     model_config = training_config["model"]
+    metrics_config = training_config.get("metrics", {})
 
     class_to_idx = {
         class_name: int(class_index)
@@ -656,6 +713,12 @@ def main() -> None:
         in data_config["class_to_idx"].items()
     }
     num_classes = int(model_config["num_classes"])
+    classification_threshold = float(
+        metrics_config.get("classification_threshold", 0.5)
+    )
+    positive_class_index = int(
+        metrics_config.get("binary_positive_class_index", 1)
+    )
 
     if len(class_to_idx) != num_classes:
         raise ValueError(
@@ -726,6 +789,8 @@ def main() -> None:
         criterion=criterion,
         device=DEVICE,
         num_classes=num_classes,
+        classification_threshold=classification_threshold,
+        positive_class_index=positive_class_index,
     )
 
     TEST_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -736,6 +801,8 @@ def main() -> None:
         device=DEVICE,
         figure_output_dir=GRADCAM_OUTPUT_DIR,
         heatmap_output_dir=GRADCAM_HEATMAP_DIR,
+        classification_threshold=classification_threshold,
+        positive_class_index=positive_class_index,
     )
 
     predictions_df = build_predictions_dataframe(
@@ -755,6 +822,8 @@ def main() -> None:
         metrics=metrics,
         confusion_matrix=confusion_matrix,
         test_time_sec=test_time_sec,
+        classification_threshold=classification_threshold,
+        positive_class_index=positive_class_index,
     )
     results["gradcam"] = {
         "target_layer": "layer4[-1]",

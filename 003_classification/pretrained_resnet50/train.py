@@ -4,6 +4,7 @@ from collections import Counter
 from datetime import datetime
 from pathlib import Path
 import time
+from uuid import uuid4
 
 import albumentations as A
 import pandas as pd
@@ -18,6 +19,7 @@ from tqdm import tqdm
 from ..utils import (
     EarlyStopping,
     append_training_log,
+    binary_probabilities_to_predictions,
     compute_auc,
     compute_classification_metrics,
     create_dataloader,
@@ -42,9 +44,12 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 #---------------------------------
 # OUTPUT
 #---------------------------------
+RUN_STARTED_AT = datetime.now().astimezone()
+RUN_ID = uuid4()
+RUN_SHORT_ID = RUN_ID.hex[:8]
+
 RESULT_DIR_NAME = (
-    datetime.now()
-    .strftime("result_%Y%m%d_%H%M")
+    f"result_{RUN_STARTED_AT:%Y%m%d_%H%M%S}_{RUN_SHORT_ID}"
 )
 
 OUTPUT_DIR = (
@@ -98,8 +103,7 @@ DATASET_ROOT = (
     / "_segmentation_dataset_v2"
 )
 
-# CT_PATH_COLUMN = "ct_windowed_path"
-CT_PATH_COLUMN = "ct_parenchyma_path"
+CT_PATH_COLUMN = "ct_windowed_path"
 
 INPUT_HEIGHT = 224
 INPUT_WIDTH = 224
@@ -127,6 +131,7 @@ WEIGHTS = ResNet50_Weights.DEFAULT
 MODEL_ARCHITECTURE = "ResNet50"
 TRAINING_STRATEGY = "feature_extraction"
 CLASSIFIER_DROPOUT = 0.3
+CLASSIFICATION_THRESHOLD = 0.5
 
 #---------------------------------
 # TRAINING
@@ -138,6 +143,7 @@ PREFETCH_FACTOR = 2
 PIN_MEMORY = torch.cuda.is_available()
 
 SEED = 42
+TRANSFORM_SEED = SEED
 
 #---------------------------------
 
@@ -178,6 +184,7 @@ STOPPING_PATIENCE = 15
 STOPPING_MIN_DELTA = 1e-4
 EARLY_STOPPING_MONITOR = "val_loss"
 STOPPING_MODE = MONITOR_TO_MODE[EARLY_STOPPING_MONITOR]
+RESET_STOPPING_ON_LR_REDUCTION = True
 
 BEST_MODEL_MONITOR = "val_loss"
 BEST_MODEL_MODE = MONITOR_TO_MODE[BEST_MODEL_MONITOR]
@@ -203,6 +210,8 @@ def train_one_epoch(
     optimizer: torch.optim.Optimizer,
     criterion: nn.Module,
     device: torch.device,
+    classification_threshold: float,
+    positive_class_index: int,
 ) -> tuple[float, float, int]:
     """
     Train the classification model for one epoch.
@@ -227,6 +236,10 @@ def train_one_epoch(
         Loss function used to optimize the model.
     device : torch.device
         Device on which the model and mini-batches are stored.
+    classification_threshold : float
+        Positive-class probability threshold used to compute accuracy.
+    positive_class_index : int
+        Class index treated as positive when applying the threshold.
 
     Returns
     -------
@@ -275,8 +288,13 @@ def train_one_epoch(
         # Update model parameters
         optimizer.step()
 
-        # Convert logits into predicted class indices
-        predictions = outputs.argmax(dim=1)
+        # Convert logits into probabilities and thresholded predictions
+        probabilities = torch.softmax(outputs, dim=1)
+        predictions = binary_probabilities_to_predictions(
+            probabilities=probabilities,
+            threshold=classification_threshold,
+            positive_class_index=positive_class_index,
+        )
 
         # Update training statistics
         running_loss += (
@@ -318,6 +336,8 @@ def validate_one_epoch(
     criterion: nn.Module,
     device: torch.device,
     num_classes: int,
+    classification_threshold: float,
+    positive_class_index: int,
 ) -> tuple[dict[str, float], torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     Evaluate the classification model for one epoch.
@@ -343,6 +363,10 @@ def validate_one_epoch(
 
     num_classes : int
         Number of classification classes.
+    classification_threshold : float
+        Positive-class probability threshold used to compute predictions.
+    positive_class_index : int
+        Class index treated as positive when applying the threshold.
 
     Returns
     -------
@@ -392,7 +416,11 @@ def validate_one_epoch(
 
             # Convert logits into class probabilities and predictions
             probabilities = torch.softmax(outputs, dim=1)
-            predictions = probabilities.argmax(dim=1)
+            predictions = binary_probabilities_to_predictions(
+                probabilities=probabilities,
+                threshold=classification_threshold,
+                positive_class_index=positive_class_index,
+            )
 
             # Update validation statistics
             running_loss += (
@@ -454,33 +482,39 @@ def main() -> None:
     # PREPARE DATASET & DATA LOADER
     #---------------------------------
 
-    train_transforms = A.Compose([
-        A.Resize(height=INPUT_HEIGHT, width=INPUT_WIDTH),
-        A.HorizontalFlip(p=0.5),
-        A.Rotate(limit=15, border_mode=0, p=0.5),
-        A.RandomBrightnessContrast(
-            brightness_limit=0.10,
-            contrast_limit=0.10,
-            p=0.3,
-        ),
-        A.GaussNoise(std_range=(0.01, 0.03), p=0.2),
-        A.Normalize(
-            mean=IMAGENET_MEAN,
-            std=IMAGENET_STD,
-            max_pixel_value=1.0,
-        ),
-        ToTensorV2(),
-    ])
+    train_transforms = A.Compose(
+        [
+            A.Resize(height=INPUT_HEIGHT, width=INPUT_WIDTH),
+            A.HorizontalFlip(p=0.5),
+            A.Rotate(limit=15, border_mode=0, p=0.5),
+            A.RandomBrightnessContrast(
+                brightness_limit=0.10,
+                contrast_limit=0.10,
+                p=0.3,
+            ),
+            A.GaussNoise(std_range=(0.01, 0.03), p=0.2),
+            A.Normalize(
+                mean=IMAGENET_MEAN,
+                std=IMAGENET_STD,
+                max_pixel_value=1.0,
+            ),
+            ToTensorV2(),
+        ],
+        seed=TRANSFORM_SEED,
+    )
 
-    val_transforms = A.Compose([
-        A.Resize(height=INPUT_HEIGHT, width=INPUT_WIDTH),
-        A.Normalize(
-            mean=IMAGENET_MEAN,
-            std=IMAGENET_STD,
-            max_pixel_value=1.0,
-        ),
-        ToTensorV2(),
-    ])
+    val_transforms = A.Compose(
+        [
+            A.Resize(height=INPUT_HEIGHT, width=INPUT_WIDTH),
+            A.Normalize(
+                mean=IMAGENET_MEAN,
+                std=IMAGENET_STD,
+                max_pixel_value=1.0,
+            ),
+            ToTensorV2(),
+        ],
+        seed=TRANSFORM_SEED,
+    )
 
     train_loader = create_dataloader(
         root_dir=DATASET_ROOT,
@@ -529,6 +563,7 @@ def main() -> None:
     model = models.resnet50(weights=WEIGHTS)
 
     num_classes = len(train_dataset.classes)
+    positive_class_index = train_dataset.class_to_idx["malignant"]
 
     model.fc = nn.Sequential(
         nn.Dropout(p=CLASSIFIER_DROPOUT),
@@ -588,9 +623,11 @@ def main() -> None:
 
     training_config = {
         "experiment": {
+            "run_id": str(RUN_ID),
+            "short_run_id": RUN_SHORT_ID,
             "result_directory": RESULT_DIR_NAME,
             "output_directory": str(OUTPUT_DIR),
-            "created_at": datetime.now().isoformat(
+            "created_at": RUN_STARTED_AT.isoformat(
                 timespec="seconds",
             ),
         },
@@ -645,6 +682,7 @@ def main() -> None:
             },
             "train_transforms": str(train_transforms),
             "val_transforms": str(val_transforms),
+            "transform_seed": TRANSFORM_SEED,
             "normalization_mean": IMAGENET_MEAN,
             "normalization_std": IMAGENET_STD,
         },
@@ -670,13 +708,14 @@ def main() -> None:
                 "auc",
             ],
             "binary_positive_class_index": (
-                1 if num_classes == 2 else None
+                positive_class_index if num_classes == 2 else None
             ),
             "binary_positive_class_name": (
-                train_dataset.classes[1]
+                train_dataset.classes[positive_class_index]
                 if num_classes == 2
                 else None
             ),
+            "classification_threshold": CLASSIFICATION_THRESHOLD,
             "multiclass_average": (
                 "macro" if num_classes > 2 else None
             ),
@@ -707,6 +746,9 @@ def main() -> None:
             "mode": STOPPING_MODE,
             "patience": STOPPING_PATIENCE,
             "min_delta": STOPPING_MIN_DELTA,
+            "reset_counter_on_lr_reduction": (
+                RESET_STOPPING_ON_LR_REDUCTION
+            ),
         },
         "checkpoint": {
             "best_model_monitor": BEST_MODEL_MONITOR,
@@ -759,7 +801,9 @@ def main() -> None:
             train_loader=train_loader,
             optimizer=optimizer,
             criterion=criterion,
-            device=DEVICE
+            device=DEVICE,
+            classification_threshold=CLASSIFICATION_THRESHOLD,
+            positive_class_index=positive_class_index,
         )
         if DEVICE.type == "cuda":
             torch.cuda.synchronize()
@@ -780,6 +824,8 @@ def main() -> None:
             criterion=criterion,
             device=DEVICE,
             num_classes=num_classes,
+            classification_threshold=CLASSIFICATION_THRESHOLD,
+            positive_class_index=positive_class_index,
         )
         if DEVICE.type == "cuda":
             torch.cuda.synchronize()
@@ -803,8 +849,17 @@ def main() -> None:
             ],
             epoch=epoch + 1,
         )
+
+        if scheduler_updated and RESET_STOPPING_ON_LR_REDUCTION:
+            early_stopping.reset_counter()
+            stop = False
+            print(
+                "Early-stopping counter reset after learning-rate "
+                f"reduction ({previous_lr:.2e} -> {current_lr:.2e})."
+            )
+
         early_stop_counter = early_stopping.counter
-        
+
         # Save Best Model
         current_best_metric = val_metrics[
             MONITOR_TO_METRIC_KEY[BEST_MODEL_MONITOR]
@@ -957,6 +1012,8 @@ def main() -> None:
         criterion=criterion,
         device=DEVICE,
         num_classes=num_classes,
+        classification_threshold=CLASSIFICATION_THRESHOLD,
+        positive_class_index=positive_class_index,
     )
 
     print(f"Best Model Validation Loss     : {best_val_metrics['loss']:.4f}")

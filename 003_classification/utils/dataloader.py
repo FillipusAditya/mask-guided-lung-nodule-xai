@@ -20,8 +20,10 @@ def create_dataloader(
     drop_last: bool = False,
     persistent_workers: bool = True,
     prefetch_factor: int = 2,
+    metadata_path: str | Path | None = None,
+    cv_fold: int | None = None,
 ) -> DataLoader:
-    """Create a configured DataLoader for one classification split."""
+    """Create a holdout-split or patient-grouped CV DataLoader."""
 
     dataset = LungClassificationDataset(
         root_dir=root_dir,
@@ -29,6 +31,8 @@ def create_dataloader(
         transform=transform,
         class_to_idx=class_to_idx,
         ct_path_column=ct_path_column,
+        metadata_path=metadata_path,
+        cv_fold=cv_fold,
     )
 
     return DataLoader(

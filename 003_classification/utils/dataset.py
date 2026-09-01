@@ -14,6 +14,8 @@ class LungClassificationDataset(Dataset):
     """Load CT slices and binary labels defined in split metadata."""
 
     VALID_SPLITS = {"train", "val", "test"}
+    DEVELOPMENT_ROLE = "development"
+    HOLDOUT_ROLE = "holdout_test"
     DEFAULT_CLASS_TO_IDX = {
         "benign": 0,
         "malignant": 1,
@@ -28,16 +30,24 @@ class LungClassificationDataset(Dataset):
         transform=None,
         class_to_idx: dict[str, int] | None = None,
         ct_path_column: str = DEFAULT_CT_PATH_COLUMN,
+        metadata_path: str | Path | None = None,
+        cv_fold: int | None = None,
     ) -> None:
-        """Initialize a CSV-backed classification dataset split."""
+        """Initialize a holdout or patient-grouped CV dataset partition."""
 
         self.root_dir = Path(root_dir)
         self.metadata_path = (
-            self.root_dir / "001_holdout_split_lidc_lndb.csv"
+            Path(metadata_path)
+            if metadata_path is not None
+            else self.root_dir / "001_holdout_split_lidc_lndb.csv"
         )
+        if not self.metadata_path.is_absolute():
+            self.metadata_path = self.root_dir / self.metadata_path
+
         self.split = split.strip().lower()
         self.ct_path_column = ct_path_column.strip()
         self.transform = transform
+        self.cv_fold = cv_fold
         self.class_to_idx = dict(
             class_to_idx or self.DEFAULT_CLASS_TO_IDX
         )
@@ -49,6 +59,13 @@ class LungClassificationDataset(Dataset):
 
         if not self.ct_path_column:
             raise ValueError("ct_path_column must not be empty.")
+
+        if self.cv_fold is not None and (
+            isinstance(self.cv_fold, bool)
+            or not isinstance(self.cv_fold, int)
+            or self.cv_fold < 0
+        ):
+            raise ValueError("cv_fold must be None or a non-negative integer.")
 
         if not self.metadata_path.is_file():
             raise FileNotFoundError(
@@ -64,6 +81,8 @@ class LungClassificationDataset(Dataset):
 
         metadata = pd.read_csv(self.metadata_path)
         required_columns = self.REQUIRED_COLUMNS | {self.ct_path_column}
+        if self.cv_fold is not None:
+            required_columns |= {"cv_role", "cv_fold"}
         missing_columns = required_columns - set(metadata.columns)
 
         if missing_columns:
@@ -101,10 +120,44 @@ class LungClassificationDataset(Dataset):
                 f"Expected: {sorted(self.class_to_idx)}"
             )
 
-        self.metadata = (
-            metadata[metadata["split"] == self.split]
-            .reset_index(drop=True)
-        )
+        if self.cv_fold is None:
+            partition_mask = metadata["split"].eq(self.split)
+        else:
+            metadata["cv_role"] = (
+                metadata["cv_role"].astype(str).str.strip().str.lower()
+            )
+            numeric_folds = pd.to_numeric(
+                metadata["cv_fold"],
+                errors="coerce",
+            )
+            if numeric_folds.isna().any() or not (
+                numeric_folds == numeric_folds.astype(int)
+            ).all():
+                raise ValueError("cv_fold metadata values must be integers.")
+            metadata["cv_fold"] = numeric_folds.astype(int)
+
+            allowed_roles = {self.DEVELOPMENT_ROLE, self.HOLDOUT_ROLE}
+            invalid_roles = set(metadata["cv_role"].unique()) - allowed_roles
+            if invalid_roles:
+                raise ValueError(
+                    f"Unsupported cv_role values: {sorted(invalid_roles)}"
+                )
+
+            development_mask = metadata["cv_role"].eq(
+                self.DEVELOPMENT_ROLE
+            )
+            if self.split == "train":
+                partition_mask = development_mask & metadata["cv_fold"].ne(
+                    self.cv_fold
+                )
+            elif self.split == "val":
+                partition_mask = development_mask & metadata["cv_fold"].eq(
+                    self.cv_fold
+                )
+            else:
+                partition_mask = metadata["cv_role"].eq(self.HOLDOUT_ROLE)
+
+        self.metadata = metadata.loc[partition_mask].reset_index(drop=True)
 
         if self.metadata.empty:
             raise ValueError(
