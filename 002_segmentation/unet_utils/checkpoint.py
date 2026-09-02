@@ -1,256 +1,152 @@
-"""Utilities for saving and restoring U-Net training checkpoints."""
+"""Utilities for saving and loading U-Net training checkpoints."""
 
+import random
 from pathlib import Path
 
+import numpy as np
 import torch
 import torch.nn as nn
 from torch.optim import Optimizer
-from torch.optim.lr_scheduler import LRScheduler
-
-from .early_stopping import EarlyStopping
 
 
-# ---------------------------------------------------------------------
-# Best Model
-# ---------------------------------------------------------------------
-def save_best_model(
-    model: nn.Module,
-    save_path: Path,
-) -> None:
-    """
-    Save the model parameters associated with the best validation result.
-
-    Parameters
-    ----------
-    model : nn.Module
-        Model whose weights will be saved.
-
-    save_path : Path
-        Output path.
-    """
-
-    torch.save(
-        model.state_dict(),
-        save_path,
-    )
-
-
-# ---------------------------------------------------------------------
-# Training Checkpoint
-# ---------------------------------------------------------------------
 def save_checkpoint(
     model: nn.Module,
     optimizer: Optimizer,
-    scheduler: LRScheduler | None,
     scaler: torch.amp.GradScaler,
-    early_stopping: EarlyStopping,
     epoch: int,
-    train_loss: float,
-    val_loss: float,
-    dice_score: float,
-    iou: float,
-    precision: float,
-    sensitivity: float,
-    specificity: float,
-    best_metric: float,
-    best_metric_name: str,
-    best_metric_mode: str,
-    learning_rate: float,
-    batch_size: int,
+    best_val_loss: float,
+    best_epoch: int,
+    epochs_without_improvement: int,
     save_path: Path,
-    architecture: str = "UNet",
 ) -> None:
     """
-    Save all state required to resume training from the current epoch.
-
-    The checkpoint contains the model, optimizer, scheduler, gradient-scaler,
-    and early-stopping states, along with training configuration and metrics.
+    Save the latest training state required to resume training.
 
     Parameters
     ----------
     model : nn.Module
         Model being trained.
-
     optimizer : Optimizer
         Training optimizer.
-
-    scheduler : LRScheduler or None
-        Learning-rate scheduler. Its state is saved when provided.
-
     scaler : torch.amp.GradScaler
         Gradient scaler used for automatic mixed-precision training.
-
-    early_stopping : EarlyStopping
-        Early-stopping controller whose state is stored in the checkpoint.
-
     epoch : int
-        Current epoch.
-
-    train_loss : float
-        Training loss.
-
-    val_loss : float
-        Validation loss.
-
-    dice_score : float
-        Dice score.
-
-    iou : float
-        Intersection-over-Union.
-
-    precision : float
-        Precision.
-
-    sensitivity : float
-        Recall / Sensitivity.
-
-    specificity : float
-        Specificity.
-
-    best_metric : float
-        Best value of the monitored model-selection metric observed.
-
-    best_metric_name : str
-        Name of the metric used to select the best model.
-
-    best_metric_mode : str
-        Optimization mode used for the best metric (``"min"`` or ``"max"``).
-
-    learning_rate : float
-        Learning rate.
-
-    batch_size : int
-        Mini-batch size.
-
+        Number of completed epochs.
+    best_val_loss : float
+        Lowest validation loss observed so far.
+    best_epoch : int
+        Epoch associated with the lowest validation loss.
+    epochs_without_improvement : int
+        Consecutive epochs completed without a lower validation loss.
     save_path : Path
         Output checkpoint path.
-
-    architecture : str, default="UNet"
-        Model architecture.
     """
 
+    numpy_rng_state = np.random.get_state()
     checkpoint = {
-        # Training progress
         "epoch": epoch,
-        "architecture": architecture,
-
-        # Hyperparameters
-        "learning_rate": learning_rate,
-        "batch_size": batch_size,
-
-        # Model state
         "model_state_dict": model.state_dict(),
-
-        # Optimizer state
         "optimizer_state_dict": optimizer.state_dict(),
-
-        # Scheduler state
-        "scheduler_state_dict":
-            scheduler.state_dict()
-            if scheduler is not None
-            else None,
-
-        # Gradient scaler state
         "scaler_state_dict": scaler.state_dict(),
-
-        # Early stopping
-        "early_stopping_state_dict":
-            early_stopping.state_dict(),
-
-        # Metrics
-        "train_loss": train_loss,
-        "val_loss": val_loss,
-        "dice_score": dice_score,
-        "iou": iou,
-        "precision": precision,
-        "sensitivity": sensitivity,
-        "specificity": specificity,
-
-        # Best metric
-        "best_metric": best_metric,
-        "best_metric_name": best_metric_name,
-        "best_metric_mode": best_metric_mode,
+        "best_val_loss": best_val_loss,
+        "best_epoch": best_epoch,
+        "epochs_without_improvement": epochs_without_improvement,
+        "python_rng_state": random.getstate(),
+        "numpy_rng_state": {
+            "bit_generator": numpy_rng_state[0],
+            "state": torch.from_numpy(numpy_rng_state[1].copy()),
+            "position": numpy_rng_state[2],
+            "has_gauss": numpy_rng_state[3],
+            "cached_gaussian": numpy_rng_state[4],
+        },
+        "torch_rng_state": torch.get_rng_state(),
+        "cuda_rng_state_all": (
+            torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None
+        ),
     }
 
-    torch.save(
-        checkpoint,
-        save_path,
-    )
+    # Replace the current run's checkpoint only after the new file is complete.
+    temporary_path = save_path.with_suffix(f"{save_path.suffix}.tmp")
+    torch.save(checkpoint, temporary_path)
+    temporary_path.replace(save_path)
 
 
-# ---------------------------------------------------------------------
-# Load Checkpoint
-# ---------------------------------------------------------------------
+def save_best_model(model: nn.Module, save_path: Path) -> None:
+    """
+    Save model parameters associated with the lowest validation loss.
+
+    Parameters
+    ----------
+    model : nn.Module
+        Model whose parameters will be saved.
+    save_path : Path
+        Output model path.
+    """
+
+    temporary_path = save_path.with_suffix(f"{save_path.suffix}.tmp")
+    torch.save(model.state_dict(), temporary_path)
+    temporary_path.replace(save_path)
+
+
 def load_checkpoint(
     checkpoint_path: Path,
     model: nn.Module,
-    optimizer: Optimizer | None = None,
-    scheduler: LRScheduler | None = None,
-    scaler: torch.amp.GradScaler | None = None,
-    early_stopping: EarlyStopping | None = None,
-) -> dict:
+    optimizer: Optimizer,
+    scaler: torch.amp.GradScaler,
+) -> tuple[int, float, int, int]:
     """
-    Load a training checkpoint and restore the supplied training components.
+    Restore training state and return the saved training progress.
 
     Parameters
     ----------
     checkpoint_path : Path
-        Checkpoint file.
-
+        Checkpoint to load.
     model : nn.Module
-        Model to restore.
-
-    optimizer : Optimizer, optional
-        Optimizer to restore. If omitted, its state is not loaded.
-
-    scheduler : LRScheduler, optional
-        Learning-rate scheduler to restore. If omitted, its state is not
-        loaded.
-
-    scaler : torch.amp.GradScaler, optional
-        Gradient scaler to restore. If omitted, its state is not loaded.
-
-    early_stopping : EarlyStopping, optional
-        Early-stopping controller to restore. If omitted, its state is not
-        loaded.
+        Model whose parameters will be restored.
+    optimizer : Optimizer
+        Optimizer whose state will be restored.
+    scaler : torch.amp.GradScaler
+        Gradient scaler whose state will be restored.
 
     Returns
     -------
-    dict
-        Checkpoint dictionary containing the saved states, configuration, and
-        metrics.
+    tuple[int, float, int, int]
+        Completed epochs, lowest validation loss, its epoch, and consecutive
+        epochs without improvement.
     """
 
-    checkpoint = torch.load(
-        checkpoint_path,
-        map_location="cpu",
+    checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
+
+    model.load_state_dict(checkpoint["model_state_dict"])
+    optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+    scaler.load_state_dict(checkpoint["scaler_state_dict"])
+
+    random.setstate(checkpoint["python_rng_state"])
+
+    numpy_rng_state = checkpoint["numpy_rng_state"]
+    np.random.set_state(
+        (
+            numpy_rng_state["bit_generator"],
+            numpy_rng_state["state"].numpy(),
+            numpy_rng_state["position"],
+            numpy_rng_state["has_gauss"],
+            numpy_rng_state["cached_gaussian"],
+        )
     )
 
-    model.load_state_dict(
-        checkpoint["model_state_dict"]
+    torch.set_rng_state(checkpoint["torch_rng_state"])
+    cuda_rng_state_all = checkpoint["cuda_rng_state_all"]
+    if torch.cuda.is_available() and cuda_rng_state_all is not None:
+        torch.cuda.set_rng_state_all(cuda_rng_state_all)
+
+    completed_epochs = int(checkpoint["epoch"])
+    best_val_loss = float(checkpoint.get("best_val_loss", float("inf")))
+    best_epoch = int(checkpoint.get("best_epoch", 0))
+    epochs_without_improvement = int(
+        checkpoint.get(
+            "epochs_without_improvement",
+            completed_epochs - best_epoch if best_epoch > 0 else 0,
+        )
     )
 
-    if optimizer is not None:
-        optimizer.load_state_dict(
-            checkpoint["optimizer_state_dict"]
-        )
-
-    if scheduler is not None and checkpoint["scheduler_state_dict"] is not None:
-        scheduler.load_state_dict(
-            checkpoint["scheduler_state_dict"]
-        )
-
-    if scaler is not None and checkpoint["scaler_state_dict"] is not None:
-        scaler.load_state_dict(
-            checkpoint["scaler_state_dict"]
-        )
-
-    if (
-        early_stopping is not None
-        and checkpoint["early_stopping_state_dict"] is not None
-    ):
-        early_stopping.load_state_dict(
-            checkpoint["early_stopping_state_dict"]
-        )
-
-    return checkpoint
+    return completed_epochs, best_val_loss, best_epoch, epochs_without_improvement

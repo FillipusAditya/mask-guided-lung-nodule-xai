@@ -1,0 +1,38 @@
+{
+    "output": {
+        "root_directory": "segmentation_results/unet_holdout_split"
+    },
+    "data": {
+        "dataset_root": "000_dataset/_segmentation_dataset_v2",
+        "split_method": "holdout_split",
+        "metadata_filename": "001_holdout_split_lidc_lndb.csv",
+        "fold": null,
+        "image_path_column": "ct_parenchyma_path",
+        "input_height": 512,
+        "input_width": 512,
+        "tile_grid_size": 4
+    },
+    "training": {
+        "learning_rate": 0.0001,
+        "batch_size": 2,
+        "total_epochs": 2,
+        "early_stopping_patience": 5,
+        "seed": 42,
+        "prediction_threshold": 0.5
+    },
+    "optimizer": {
+        "weight_decay": 0.0001
+    },
+    "dataloader": {
+        "num_workers": 0,
+        "persistent_workers": true,
+        "prefetch_factor": 2,
+        "train_shuffle": true
+    },
+    "amp": {
+        "training_enabled": true
+    },
+    "checkpoint": {
+        "resume_checkpoint_path": "segmentation_results/unet_holdout_split/3df243b7-3f5f-489f-abf7-7f5628a9638b/last_checkpoint.pth"
+    }
+}

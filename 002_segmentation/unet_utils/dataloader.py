@@ -1,9 +1,7 @@
 """DataLoader factory for the lung nodule segmentation dataset."""
 
 from pathlib import Path
-
 from torch.utils.data import DataLoader
-
 from .dataset import LungDataset
 
 
@@ -12,6 +10,11 @@ def create_dataloader(
     split: str,
     batch_size: int,
     transform=None,
+    split_method: str = "holdout_split",
+    metadata_filename: str | Path = "001_holdout_split_lidc_lndb.csv",
+    fold: int | None = None,
+    image_path_column: str = "ct_parenchyma_path",
+    tile_grid_size: int = 4,
     shuffle: bool = False,
     num_workers: int = 4,
     pin_memory: bool = True,
@@ -32,6 +35,17 @@ def create_dataloader(
         Number of samples in each batch.
     transform : callable, optional
         Transform applied to each dataset sample.
+    split_method : str, default="holdout_split"
+        Dataset splitting method. Use ``"holdout_split"`` for fixed splits
+        or ``"group_kfold"`` for Group K-Fold cross-validation.
+    metadata_filename : str or Path
+        Metadata CSV filename or path.
+    fold : int, optional
+        Validation fold used by Group K-Fold cross-validation.
+    image_path_column : str, default="ct_parenchyma_path"
+        Metadata column containing relative CT image paths.
+    tile_grid_size : int, default=4
+        Number of tile rows and columns used to divide each sample.
     shuffle : bool, default=False
         Whether to shuffle samples each epoch.
     num_workers : int, default=4
@@ -54,6 +68,11 @@ def create_dataloader(
     dataset = LungDataset(
         root_dir=root_dir,
         split=split,
+        split_method=split_method,
+        metadata_filename=metadata_filename,
+        fold=fold,
+        image_path_column=image_path_column,
+        tile_grid_size=tile_grid_size,
         transform=transform,
     )
 
