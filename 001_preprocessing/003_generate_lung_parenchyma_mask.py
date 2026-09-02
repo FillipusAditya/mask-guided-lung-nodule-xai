@@ -1,3 +1,5 @@
+from collections import OrderedDict
+from collections.abc import Mapping
 from pathlib import Path
 
 import numpy as np
@@ -12,20 +14,10 @@ from tqdm import tqdm
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 # Directory containing CT volumes (.npy).
-INPUT_DIR = (
-    PROJECT_ROOT 
-    / "000_dataset" 
-    / "_lidc" 
-    / "001_volume_npy"
-)
+INPUT_DIR = PROJECT_ROOT / "000_dataset" / "_lidc" / "001_volume_npy"
 
 # Directory to save binary lung masks.
-MASK_OUTPUT_DIR = (
-    PROJECT_ROOT 
-    / "000_dataset" 
-    / "_lidc" 
-    / "003_mask_parenchyma_npy"
-)
+MASK_OUTPUT_DIR = PROJECT_ROOT / "000_dataset" / "_lidc" / "003_mask_parenchyma_npy"
 
 # Segmentation parameters
 
@@ -41,6 +33,25 @@ TRACHEA_AREA_THRESHOLD = 0.0069
 
 # Number of binary dilation iterations applied to recover lung boundaries.
 DILATION_ITERATIONS = 5
+
+# Enable or disable individual stages in the segmentation pipeline.
+# A disabled post-processing stage passes its input mask through unchanged.
+STAGE_ENABLED = OrderedDict(
+    [
+        ("1. Threshold HU", True),
+        ("2. Remove border objects", True),
+        ("3. Keep largest components", True),
+        ("4. Fill holes", True),
+        ("5. Remove trachea", True),
+        ("6. Remove table/artifacts", True),
+        ("7. Binary dilation", True),
+    ]
+)
+
+# Optional directory containing an alternative binary initial mask volume for
+# every input CT volume. This is required only when HU thresholding is disabled.
+# Each mask file must have the same filename and shape as its CT volume.
+INITIAL_MASK_DIR: Path | None = None
 
 
 def threshold_lung(slice_image: np.ndarray) -> np.ndarray:
@@ -221,11 +232,51 @@ def dilate_mask(mask: np.ndarray) -> np.ndarray:
     return binary_dilation(mask, iterations=DILATION_ITERATIONS)
 
 
-def process_slice(slice_image: np.ndarray) -> np.ndarray:
+STAGE_FUNCTIONS = OrderedDict(
+    [
+        ("1. Threshold HU", threshold_lung),
+        ("2. Remove border objects", remove_border_objects),
+        ("3. Keep largest components", keep_largest_components),
+        ("4. Fill holes", fill_holes),
+        ("5. Remove trachea", remove_trachea),
+        ("6. Remove table/artifacts", remove_table),
+        ("7. Binary dilation", dilate_mask),
+    ]
+)
+
+
+def validate_stage_configuration(stage_config: Mapping[str, bool]) -> None:
+    """Validate the names, order, and values of a stage configuration."""
+    expected_stages = list(STAGE_FUNCTIONS)
+    configured_stages = list(stage_config)
+
+    if configured_stages != expected_stages:
+        raise ValueError(
+            "stage_config must contain exactly these stages in order:\n"
+            + "\n".join(f"  - {stage}" for stage in expected_stages)
+        )
+
+    invalid_values = {
+        stage: enabled
+        for stage, enabled in stage_config.items()
+        if not isinstance(enabled, (bool, np.bool_))
+    }
+    if invalid_values:
+        raise TypeError(
+            "Every STAGE_ENABLED value must be True or False. "
+            f"Invalid values: {invalid_values}"
+        )
+
+
+def process_slice(
+    slice_image: np.ndarray,
+    stage_config: Mapping[str, bool] | None = None,
+    initial_mask: np.ndarray | None = None,
+) -> np.ndarray:
     """
     Segment the lung parenchyma from a single CT slice.
 
-    The segmentation pipeline consists of:
+    The configurable segmentation pipeline consists of:
         1. HU thresholding
         2. Border object removal
         3. Largest component selection
@@ -238,19 +289,45 @@ def process_slice(slice_image: np.ndarray) -> np.ndarray:
     ----------
     slice_image : np.ndarray
         One axial CT slice.
+    stage_config : mapping or None
+        Mapping that enables or disables each pipeline stage.
+    initial_mask : np.ndarray or None
+        Alternative binary mask used when HU thresholding is disabled.
 
     Returns
     -------
     np.ndarray
         Binary lung mask as uint8.
     """
-    mask = threshold_lung(slice_image)
-    mask = remove_border_objects(mask)
-    mask = keep_largest_components(mask)
-    mask = fill_holes(mask)
-    mask = remove_trachea(mask)
-    mask = remove_table(mask)
-    mask = dilate_mask(mask)
+    active_stage_config = STAGE_ENABLED if stage_config is None else stage_config
+    validate_stage_configuration(active_stage_config)
+
+    mask = None
+
+    for stage_name, stage_function in STAGE_FUNCTIONS.items():
+        is_enabled = bool(active_stage_config[stage_name])
+
+        if stage_name == "1. Threshold HU":
+            if is_enabled:
+                mask = stage_function(slice_image)
+            elif initial_mask is not None:
+                if initial_mask.shape != slice_image.shape:
+                    raise ValueError(
+                        "initial_mask and slice_image must have the same shape."
+                    )
+
+                unique_values = np.unique(initial_mask)
+                if not np.all(np.isin(unique_values, [0, 1])):
+                    raise ValueError("initial_mask must be binary with values 0 and 1.")
+
+                mask = np.asarray(initial_mask, dtype=bool).copy()
+            else:
+                raise ValueError(
+                    "HU thresholding cannot be disabled for raw HU input "
+                    "unless an alternative binary initial_mask is provided."
+                )
+        elif is_enabled:
+            mask = stage_function(mask)
 
     return mask.astype(np.uint8)
 
@@ -258,6 +335,8 @@ def process_slice(slice_image: np.ndarray) -> np.ndarray:
 def segment_lung_parenchyma(
     ct_volume: np.ndarray,
     volume_name: str,
+    stage_config: Mapping[str, bool] | None = None,
+    initial_mask_volume: np.ndarray | None = None,
 ) -> np.ndarray:
     """
     Segment lung parenchyma for every slice in a CT volume.
@@ -268,26 +347,82 @@ def segment_lung_parenchyma(
         Three-dimensional CT volume.
     volume_name : str
         Volume name displayed in the progress bar.
+    stage_config : mapping or None
+        Mapping that enables or disables each pipeline stage.
+    initial_mask_volume : np.ndarray or None
+        Alternative 3D binary mask used when HU thresholding is disabled.
 
     Returns
     -------
     np.ndarray
         Three-dimensional binary lung mask.
     """
+    active_stage_config = STAGE_ENABLED if stage_config is None else stage_config
+    validate_stage_configuration(active_stage_config)
+
+    if ct_volume.ndim != 3:
+        raise ValueError(
+            f"ct_volume must be three-dimensional, got shape {ct_volume.shape}."
+        )
+
+    if initial_mask_volume is not None:
+        if initial_mask_volume.shape != ct_volume.shape:
+            raise ValueError(
+                "initial_mask_volume and ct_volume must have the same shape."
+            )
+
+        unique_values = np.unique(initial_mask_volume)
+        if not np.all(np.isin(unique_values, [0, 1])):
+            raise ValueError("initial_mask_volume must be binary with values 0 and 1.")
+
     masks = []
 
-    for slice_image in tqdm(
-        ct_volume,
-        desc=f"Segmenting {volume_name}",
-        leave=False,
-        unit="slice",
+    for slice_index, slice_image in enumerate(
+        tqdm(
+            ct_volume,
+            desc=f"Segmenting {volume_name}",
+            leave=False,
+            unit="slice",
+        )
     ):
-        masks.append(process_slice(slice_image))
+        initial_mask = (
+            None if initial_mask_volume is None else initial_mask_volume[slice_index]
+        )
+        masks.append(
+            process_slice(
+                slice_image=slice_image,
+                stage_config=active_stage_config,
+                initial_mask=initial_mask,
+            )
+        )
 
     return np.stack(masks, axis=0)
 
 
-def process_volume(ct_file: Path) -> None:
+def load_initial_mask_volume(
+    ct_file: Path,
+    stage_config: Mapping[str, bool],
+) -> np.ndarray | None:
+    """Load an alternative initial mask when HU thresholding is disabled."""
+    if stage_config["1. Threshold HU"]:
+        return None
+
+    if INITIAL_MASK_DIR is None:
+        raise ValueError('Set INITIAL_MASK_DIR when "1. Threshold HU" is disabled.')
+
+    initial_mask_file = Path(INITIAL_MASK_DIR) / ct_file.name
+    if not initial_mask_file.is_file():
+        raise FileNotFoundError(
+            f"Initial mask volume was not found: {initial_mask_file}"
+        )
+
+    return np.load(initial_mask_file)
+
+
+def process_volume(
+    ct_file: Path,
+    stage_config: Mapping[str, bool] | None = None,
+) -> None:
     """
     Process one CT volume and save the lung parenchyma mask.
 
@@ -295,12 +430,23 @@ def process_volume(ct_file: Path) -> None:
     ----------
     ct_file : Path
         Path to the input CT volume.
+    stage_config : mapping or None
+        Mapping that enables or disables each pipeline stage.
     """
+    active_stage_config = STAGE_ENABLED if stage_config is None else stage_config
+    validate_stage_configuration(active_stage_config)
+
     ct_volume = np.load(ct_file)
+    initial_mask_volume = load_initial_mask_volume(
+        ct_file=ct_file,
+        stage_config=active_stage_config,
+    )
 
     lung_mask = segment_lung_parenchyma(
         ct_volume=ct_volume,
         volume_name=ct_file.stem,
+        stage_config=active_stage_config,
+        initial_mask_volume=initial_mask_volume,
     )
 
     np.save(
@@ -313,23 +459,31 @@ def main() -> None:
     """
     Perform lung parenchyma segmentation for every CT volume in the dataset.
     """
+    validate_stage_configuration(STAGE_ENABLED)
+
     MASK_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
     ct_files = sorted(INPUT_DIR.glob("*.npy"))
 
     if len(ct_files) == 0:
-        raise FileNotFoundError(
-            f"No .npy files were found in:\n{INPUT_DIR.resolve()}"
-        )
+        raise FileNotFoundError(f"No .npy files were found in:\n{INPUT_DIR.resolve()}")
 
-    print(f"Found {len(ct_files)} CT volumes.\n")
+    print("Stage Configuration:")
+    for stage_name, is_enabled in STAGE_ENABLED.items():
+        status = "ON" if is_enabled else "OFF"
+        print(f"  [{status:<3}] {stage_name}")
+
+    print(f"\nFound {len(ct_files)} CT volumes.\n")
 
     for ct_file in tqdm(
         ct_files,
         desc="Overall Progress",
         unit="volume",
     ):
-        process_volume(ct_file)
+        process_volume(
+            ct_file=ct_file,
+            stage_config=STAGE_ENABLED,
+        )
 
     print("\nProcessing completed successfully.")
     print(f"Processed Volumes : {len(ct_files)}")
