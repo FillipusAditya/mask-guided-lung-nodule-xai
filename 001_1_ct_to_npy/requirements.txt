@@ -1,0 +1,5 @@
+numpy
+Pillow
+pylidc
+SimpleITK
+tqdm

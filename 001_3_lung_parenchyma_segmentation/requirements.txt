@@ -1,0 +1,8 @@
+numpy
+matplotlib
+pandas
+pylidc
+scipy
+SimpleITK
+scikit-image
+tqdm
