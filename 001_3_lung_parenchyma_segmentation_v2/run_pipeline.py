@@ -27,8 +27,7 @@ from step_1_ct_to_numpy import (
     load_scan,
 )
 from step_2_segmentation import segment_volume
-from step_3_median_filter import filter_volume
-from step_4_normalize_and_mask import normalize_and_mask
+from step_4_normalize_and_mask import filter_normalize_and_mask
 
 
 def create_lung_parenchyma(
@@ -37,8 +36,11 @@ def create_lung_parenchyma(
 ) -> tuple[np.ndarray, np.ndarray, dict]:
     """Return final uint8 mask, float32 parenchyma, and diagnostics."""
     mask, metrics = segment_volume(volume, show_progress=show_slice_progress)
-    filtered = filter_volume(volume)
-    parenchyma = normalize_and_mask(filtered, mask)
+    parenchyma = filter_normalize_and_mask(
+        volume,
+        mask,
+        show_progress=show_slice_progress,
+    )
     validate_outputs(volume, mask, parenchyma)
     return mask, parenchyma, metrics.to_dict()
 
@@ -53,16 +55,17 @@ def validate_outputs(
         raise ValueError("Source, mask, and parenchyma shapes do not match.")
     if mask.dtype != np.uint8:
         raise TypeError(f"Mask must be uint8, received {mask.dtype}.")
-    if not np.isin(mask, (0, 1)).all():
+    if mask.min() < 0 or mask.max() > 1:
         raise ValueError("Mask contains values other than 0 and 1.")
     if parenchyma.dtype != np.float32:
         raise TypeError(f"Parenchyma must be float32, received {parenchyma.dtype}.")
-    if not np.isfinite(parenchyma).all():
-        raise ValueError("Parenchyma contains non-finite values.")
     if parenchyma.min() < 0.0 or parenchyma.max() > 1.0:
         raise ValueError("Normalized parenchyma is outside [0, 1].")
-    if np.any(parenchyma[mask == 0] != 0.0):
-        raise ValueError("Pixels outside the lung mask are not zero.")
+    for index in range(len(parenchyma)):
+        if not np.isfinite(parenchyma[index]).all():
+            raise ValueError("Parenchyma contains non-finite values.")
+        if np.any(parenchyma[index][mask[index] == 0] != 0.0):
+            raise ValueError("Pixels outside the lung mask are not zero.")
 
 
 def _atomic_save(array: np.ndarray, output_path: Path) -> None:
@@ -238,4 +241,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

@@ -14,17 +14,18 @@ separate quality-control PNG files by `quality_control.py`.
 ```text
 Original CT in Hounsfield Units
 ├── candidate masks for every slice
-│   threshold → clear border → largest components → fill holes
+│   threshold → clear border → remove wide/flat table
+│             → largest components → fill holes
 │                              │
 │                              ▼
-│   clean middle reference
+│   nearest clean bilateral reference
 │   remove table → remove trachea → keep two lungs
 │                              │
 │                              ▼
-│   bidirectional component matching and seeded reconstruction
+│   bidirectional matching with retained last-valid reference
 │                              │
 │                              ▼
-│   residual trachea removal → boundary repair → final uint8 mask
+│   residual trachea removal → radius-16 boundary repair → final mask
 │
 └── 3×3 median filter → lung window [-1400, 200] HU
                          → float32 normalization [0, 1]
@@ -94,9 +95,18 @@ conda run -n nodule_py310 python \
 Expected ending:
 
 ```text
-Ran 6 tests
+Ran 11 tests
 OK
 ```
+
+## Batch memory behavior
+
+The batch runner processes one study at a time. Within a study, the candidate
+mask buffer is reused for propagation and final boundary repair. Median
+filtering, normalization, and masking are performed one axial slice at a time
+and written directly into the final `float32` parenchyma array. This avoids
+holding separate full-volume candidate, protected, repaired, median-filtered,
+and normalized arrays in memory at the same time.
 
 ### Step 2 — Validate all available studies without saving arrays
 
@@ -247,7 +257,7 @@ Always check that value before a large production run. At the time of writing,
 it is configured as:
 
 ```text
-000_dataset/lung_parenchyma_v3
+000_dataset_v2/lung_parenchyma_v3
 ```
 
 The generated structure is:

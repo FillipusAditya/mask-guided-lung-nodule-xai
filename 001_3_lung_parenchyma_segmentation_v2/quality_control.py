@@ -39,7 +39,8 @@ def _load_volume(path: str | Path, description: str) -> np.ndarray:
     path = Path(path)
     if not path.is_file():
         raise FileNotFoundError(f"{description} was not found: {path}")
-    volume = np.load(path, allow_pickle=False)
+    # Memory mapping keeps batch QC from loading both full saved volumes at once.
+    volume = np.load(path, allow_pickle=False, mmap_mode="r")
     if volume.ndim != 3:
         raise ValueError(
             f"{description} must have shape (N, H, W), received {volume.shape}."

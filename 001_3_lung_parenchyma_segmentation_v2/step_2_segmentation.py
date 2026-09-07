@@ -16,7 +16,10 @@ from config import (
     NUM_LARGEST_COMPONENTS,
     REFERENCE_DILATION_SCHEDULE,
     TABLE_COMPONENT_AREA_THRESHOLD,
+    TABLE_LOWER_CENTER_Y_RATIO,
+    TABLE_MAX_HEIGHT_WIDTH_RATIO,
     TABLE_MAX_Y_RATIO,
+    TABLE_MIN_WIDTH_RATIO,
     TABLE_MIN_Y_RATIO,
     TRACHEA_AREA_THRESHOLD,
     TRACHEA_CENTER_HALF_WIDTH_RATIO,
@@ -53,19 +56,39 @@ def keep_largest_components(mask: np.ndarray, number: int) -> np.ndarray:
     return output
 
 
+def remove_wide_flat_table(mask: np.ndarray) -> np.ndarray:
+    """Remove a wide, flat component in the lower part of an axial image."""
+    labeled = label(mask)
+    output = mask.copy()
+    height, width = mask.shape
+
+    for region in regionprops(labeled):
+        min_y, min_x, max_y, max_x = region.bbox
+        component_height = max_y - min_y
+        component_width = max_x - min_x
+        height_width_ratio = component_height / max(component_width, 1)
+        is_lower = region.centroid[0] > TABLE_LOWER_CENTER_Y_RATIO * height
+        is_wide = component_width > TABLE_MIN_WIDTH_RATIO * width
+        is_flat = height_width_ratio < TABLE_MAX_HEIGHT_WIDTH_RATIO
+        if is_lower and is_wide and is_flat:
+            output[labeled == region.label] = False
+    return output
+
+
 def candidate_mask(image: np.ndarray) -> np.ndarray:
-    """Build a sensitive candidate without trachea/table removal."""
+    """Build a sensitive candidate with high-specificity table removal."""
     if image.ndim != 2:
         raise ValueError(f"Expected a 2D slice, received {image.shape}.")
     mask = threshold_lung(image)
     mask = clear_border(mask)
+    mask = remove_wide_flat_table(mask)
     mask = keep_largest_components(mask, NUM_LARGEST_COMPONENTS)
     return ndi.binary_fill_holes(mask).astype(bool)
 
 
 def build_candidate_volume(volume: np.ndarray, show_progress: bool = False) -> np.ndarray:
-    """Build candidate masks for all axial slices."""
-    masks = np.zeros(volume.shape, dtype=bool)
+    """Build uint8 candidate masks for all axial slices."""
+    masks = np.zeros(volume.shape, dtype=np.uint8)
     indices = range(len(volume))
     if show_progress:
         indices = tqdm(indices, desc="Candidate masks", unit="slice", leave=False)
@@ -75,9 +98,9 @@ def build_candidate_volume(volume: np.ndarray, show_progress: bool = False) -> n
 
 
 def remove_table(mask: np.ndarray) -> np.ndarray:
-    """Conservatively remove small peripheral components from the reference."""
-    labeled = label(mask)
-    output = mask.copy()
+    """Remove table geometry plus small peripheral reference components."""
+    output = remove_wide_flat_table(mask)
+    labeled = label(output)
     height, width = mask.shape
     image_area = height * width
 
@@ -112,20 +135,43 @@ def remove_trachea(mask: np.ndarray) -> np.ndarray:
 
 
 def clean_reference(candidate: np.ndarray) -> np.ndarray:
-    """Clean the middle seed and retain at most two lung components."""
+    """Clean one reference candidate and retain at most two lung components."""
     mask = remove_table(candidate)
     mask = remove_trachea(mask)
     mask = keep_largest_components(mask, 2)
     return ndi.binary_fill_holes(mask).astype(bool)
 
 
+def has_bilateral_lung_components(mask: np.ndarray) -> bool:
+    """Return whether substantial components occur on both image halves."""
+    height, width = mask.shape
+    minimum_area = 0.01 * height * width
+    center_x_values = [
+        region.centroid[1]
+        for region in regionprops(label(mask))
+        if region.area >= minimum_area
+    ]
+    return (
+        any(center_x < width / 2 for center_x in center_x_values)
+        and any(center_x > width / 2 for center_x in center_x_values)
+    )
+
+
 def select_reference_index(candidates: np.ndarray) -> int:
-    """Use the middle slice, falling back to its nearest valid neighbor."""
+    """Prefer the nearest-to-middle clean slice containing bilateral lungs."""
     middle = len(candidates) // 2
     search_order = sorted(range(len(candidates)), key=lambda index: abs(index - middle))
+    nearest_valid_index = None
     for index in search_order:
-        if clean_reference(candidates[index]).any():
+        cleaned = clean_reference(candidates[index])
+        if not cleaned.any():
+            continue
+        if nearest_valid_index is None:
+            nearest_valid_index = index
+        if has_bilateral_lung_components(cleaned):
             return index
+    if nearest_valid_index is not None:
+        return nearest_valid_index
     raise ValueError("No non-empty clean reference mask could be constructed.")
 
 
@@ -165,25 +211,38 @@ def propagate_bidirectionally(
     candidates: np.ndarray,
     reference_index: int,
     reference_mask: np.ndarray,
+    in_place: bool = False,
 ) -> tuple[np.ndarray, list[int]]:
-    """Propagate from the reference toward smaller and larger indices."""
-    protected = np.zeros_like(candidates, dtype=bool)
+    """Propagate both ways, optionally reusing the candidate-volume buffer."""
+    protected = candidates if in_place else np.zeros_like(candidates, dtype=bool)
     protected[reference_index] = reference_mask
     failed = []
 
+    last_valid_reference = reference_mask
     for index in range(reference_index - 1, -1, -1):
-        protected[index], did_fail = propagate_one_slice(
-            candidates[index], protected[index + 1]
+        candidate = protected[index] if in_place else candidates[index]
+        candidate_is_non_empty = bool(candidate.any())
+        propagated, did_fail = propagate_one_slice(
+            candidate, last_valid_reference
         )
-        if did_fail and candidates[index].any():
+        protected[index] = propagated
+        if did_fail and candidate_is_non_empty:
             failed.append(index)
+        if not did_fail:
+            last_valid_reference = propagated
 
+    last_valid_reference = reference_mask
     for index in range(reference_index + 1, len(candidates)):
-        protected[index], did_fail = propagate_one_slice(
-            candidates[index], protected[index - 1]
+        candidate = protected[index] if in_place else candidates[index]
+        candidate_is_non_empty = bool(candidate.any())
+        propagated, did_fail = propagate_one_slice(
+            candidate, last_valid_reference
         )
-        if did_fail and candidates[index].any():
+        protected[index] = propagated
+        if did_fail and candidate_is_non_empty:
             failed.append(index)
+        if not did_fail:
+            last_valid_reference = propagated
 
     return protected, sorted(failed)
 
@@ -215,9 +274,13 @@ def repair_boundary(mask: np.ndarray) -> np.ndarray:
     return repaired
 
 
-def finalize_mask_volume(protected: np.ndarray, show_progress: bool = False) -> np.ndarray:
-    """Remove residual trachea, then repair the boundary of every slice."""
-    final = np.zeros_like(protected, dtype=bool)
+def finalize_mask_volume(
+    protected: np.ndarray,
+    show_progress: bool = False,
+    in_place: bool = False,
+) -> np.ndarray:
+    """Remove trachea and repair boundaries, optionally reusing the input."""
+    final = protected if in_place else np.zeros_like(protected, dtype=bool)
     indices = range(len(protected))
     if show_progress:
         indices = tqdm(indices, desc="Final mask repair", unit="slice", leave=False)
@@ -259,7 +322,11 @@ def segment_volume(
     candidates = build_candidate_volume(volume, show_progress)
     reference_index = select_reference_index(candidates)
     reference = clean_reference(candidates[reference_index])
-    protected, failed = propagate_bidirectionally(candidates, reference_index, reference)
-    final = finalize_mask_volume(protected, show_progress)
-    return final.astype(np.uint8), _metrics(final, reference_index, failed)
-
+    protected, failed = propagate_bidirectionally(
+        candidates,
+        reference_index,
+        reference,
+        in_place=True,
+    )
+    final = finalize_mask_volume(protected, show_progress, in_place=True)
+    return final.astype(np.uint8, copy=False), _metrics(final, reference_index, failed)

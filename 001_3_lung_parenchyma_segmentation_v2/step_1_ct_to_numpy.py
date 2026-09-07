@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
+import pydicom
 import pylidc as pl
 import SimpleITK as sitk
 
@@ -120,16 +121,57 @@ def discover_lndb_scans(
     return sources
 
 
+def _sorted_lidc_dicom_paths(scan: pl.Scan) -> list[Path]:
+    """Return the scan's DICOM paths in pylidc-compatible axial order."""
+    series_dir = Path(scan.get_path_to_dicom_files())
+    by_z = {}
+
+    for path in sorted(series_dir.glob("*.dcm")):
+        header = pydicom.dcmread(path, stop_before_pixels=True)
+        if (
+            str(header.SeriesInstanceUID).strip() != scan.series_instance_uid
+            or str(header.StudyInstanceUID).strip() != scan.study_instance_uid
+        ):
+            continue
+
+        z_position = float(header.ImagePositionPatient[-1])
+        instance_number = float(header.InstanceNumber)
+        previous = by_z.get(z_position)
+        if previous is None or instance_number < previous[0]:
+            by_z[z_position] = (instance_number, path)
+
+    return [by_z[z_position][1] for z_position in sorted(by_z)]
+
+
 def load_lidc_scan(scan: pl.Scan) -> np.ndarray:
-    """Load one pylidc scan as int16 with shape (slices, height, width)."""
-    volume = np.transpose(scan.to_volume(), (2, 0, 1)).astype(np.int16)
+    """Load one LIDC scan slice-wise into one int16 volume."""
+    paths = _sorted_lidc_dicom_paths(scan)
+    if not paths:
+        raise FileNotFoundError(f"No matching DICOM images found for {lidc_filename(scan)}.")
+
+    first = pydicom.dcmread(paths[0])
+    volume = np.empty(
+        (len(paths), int(first.Rows), int(first.Columns)),
+        dtype=np.int16,
+    )
+
+    for index, path in enumerate(paths):
+        image = first if index == 0 else pydicom.dcmread(path)
+        if image.pixel_array.shape != volume.shape[1:]:
+            raise ValueError(f"Inconsistent DICOM image shape in {path}.")
+        scaled = (
+            image.pixel_array * float(image.RescaleSlope)
+            + float(image.RescaleIntercept)
+        )
+        volume[index] = scaled.astype(np.int16, copy=False)
+
     return validate_ct_volume(volume)
 
 
 def load_lndb_scan(mhd_path: str | Path) -> np.ndarray:
     """Load one MHD scan as int16 with shape (slices, height, width)."""
     image = sitk.ReadImage(str(mhd_path))
-    volume = sitk.GetArrayFromImage(image).astype(np.int16)
+    volume = sitk.GetArrayFromImage(image).astype(np.int16, copy=False)
     return validate_ct_volume(volume)
 
 
@@ -148,7 +190,6 @@ def validate_ct_volume(volume: np.ndarray) -> np.ndarray:
         raise ValueError(f"Expected shape (N, H, W), received {volume.shape}.")
     if volume.shape[0] < 2 or min(volume.shape[1:]) < 32:
         raise ValueError(f"CT volume is unexpectedly small: {volume.shape}.")
-    if not np.isfinite(volume).all():
+    if not np.issubdtype(volume.dtype, np.integer) and not np.isfinite(volume).all():
         raise ValueError("CT volume contains non-finite values.")
     return volume
-
