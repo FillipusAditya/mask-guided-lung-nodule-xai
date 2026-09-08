@@ -30,13 +30,33 @@ Konfigurasi default membaca:
 
 - metadata: `000_dataset/_segmentation_dataset_v2/004_classification_cv_5fold_seed42.csv`
 - CT: kolom `ct_windowed_path`
-- probability map: `segmentation_results/unet_holdout_split/242d4058-fee2-47cb-b1f2-6608348300f5/inference/probability_npy`
+- probability map: `experiment_results/<experiment_id>/segmentation/unet/inference/probability_npy`
 
 Nama setiap probability `.npy` harus sama dengan kolom `filename`. Dataset
 memvalidasi keberadaan semua pasangan, dimensi array, nilai finite, dan rentang
 probabilitas `[0, 1]` sebelum training/inference. Resolusi awal CT dan
 probability map boleh berbeda; keduanya di-resize langsung ke `224 x 224`
 oleh transform berpasangan sebelum augmentasi geometris berikutnya.
+
+## Konfigurasi
+
+Seluruh pengaturan eksperimen utama berada di
+`003_classification/configs/segmentation_guided_cv_resnet50.json`, meliputi
+UUID eksperimen, layout output, sumber data dan probability map, skema CV,
+arsitektur attention, hyperparameter training, optimizer, DataLoader, early
+stopping, serta checkpoint. Path relatif selalu di-resolve dari root
+repository.
+
+Saat training dimulai, file JSON yang efektif disalin ke:
+
+```text
+experiment_results/<experiment_id>/classification/guided_resnet50/
+└── segmentation_guided_cv_resnet50.json
+```
+
+File ini adalah snapshot input konfigurasi. `cv_config.json` dan
+`fold_<n>/training_config.json` tetap dibuat sebagai provenance runtime yang
+lebih terperinci, termasuk distribusi data, path output, dan UUID run internal.
 
 ## Menjalankan
 
@@ -46,13 +66,32 @@ Jalankan dari root repository pada environment `deep_learning`:
 conda run -n deep_learning python -m 003_classification.segmentation_guided_cv_resnet50.train
 ```
 
-Setelah kelima fold selesai, gunakan direktori `cv_result_*` yang dihasilkan:
+Konfigurasi default saat ini menyatukan hasil U-Net dan guided classification
+di bawah UUID `dc730a13-5813-4d87-b15c-3b630deb32b5`:
+
+```text
+experiment_results/dc730a13-5813-4d87-b15c-3b630deb32b5/
+├── segmentation/unet/
+└── classification/guided_resnet50/
+```
+
+Gunakan UUID baru di JSON jika hendak memulai eksperimen baru. Training tidak
+akan menimpa direktori guided classification yang sudah ada.
+
+Setelah kelima fold selesai, gunakan komponen guided classification pada
+experiment UUID yang sama:
 
 ```bash
 conda run -n deep_learning python -m pip install -r 003_classification/segmentation_guided_cv_resnet50/requirements.txt
-conda run -n deep_learning python -m 003_classification.segmentation_guided_cv_resnet50.test \
-  classification_results/segmentation_guided_cv_resnet50/cv_result_YYYYMMDD_HHMMSS_ID
+conda run -n deep_learning python -m 003_classification.segmentation_guided_cv_resnet50.test
 ```
+
+Tanpa argumen, `test.py` menggunakan hasil Colab yang ditempatkan di
+`experiment_results/dc730a13-5813-4d87-b15c-3b630deb32b5/classification/guided_resnet50`.
+Direktori hasil CV lain masih dapat diberikan sebagai argumen positional.
+Path absolut `/content/...` yang tersimpan di konfigurasi Colab otomatis
+dipetakan ke dataset dan probability map lokal tanpa mengubah provenance
+konfigurasi asli.
 
 `test.py` melakukan ensemble atas lima model fold pada holdout test dan
 menyimpan prediksi, metrik, confusion matrix, ROC, serta Grad-CAM dan LRP dalam
@@ -64,14 +103,19 @@ Struktur utama hasil test:
 
 ```text
 test/
-├── gradcam/ dan gradcam_npy/
-├── lrp/ dan lrp_npy/
-├── xai/                       # panel CT, probability, Grad-CAM, dan LRP
+├── gradcam_npy/               # Grad-CAM per slice pada ruang input model
+├── lrp_npy/                   # LRP per slice pada ruang input model
+├── visualization/             # satu PNG per study, section per nodule
 ├── test_predictions.csv
 ├── test_results.json
 ├── confusion_matrix.*
 └── roc_curve.png
 ```
+
+Setiap baris slice pada section nodule menampilkan full windowed CT,
+ground-truth nodule mask, probability heatmap U-Net, Grad-CAM overlay, dan LRP
+overlay. Grad-CAM dan LRP di-resize ke grid CT asli hanya untuk visualisasi;
+array `.npy` tetap disimpan pada resolusi input model.
 
 ## Catatan validasi
 

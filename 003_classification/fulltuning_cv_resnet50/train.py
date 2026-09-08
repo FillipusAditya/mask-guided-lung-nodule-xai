@@ -4,6 +4,7 @@ from collections import Counter
 from datetime import datetime
 import json
 from pathlib import Path
+import shutil
 import time
 from typing import Any
 from uuid import uuid4
@@ -16,6 +17,7 @@ from torch.utils.data import DataLoader
 
 from ..fulltuning_resnet50 import train as base_train
 from ..utils import (
+    EarlyStopping,
     append_training_log,
     binary_probabilities_to_predictions,
     create_dataloader,
@@ -52,6 +54,10 @@ CV_SUMMARY_PATH = OUTPUT_DIR / "cv_summary.csv"
 CV_SUMMARY_JSON_PATH = OUTPUT_DIR / "cv_summary.json"
 OOF_PREDICTIONS_PATH = OUTPUT_DIR / "out_of_fold_predictions.csv"
 CV_FIGURES_DIR = OUTPUT_DIR / "figures"
+CONFIG_SNAPSHOT_SOURCE: Path | None = None
+CONFIG_SNAPSHOT_PATH: Path | None = None
+EXPERIMENT_ID: str | None = None
+EXPERIMENT_COMPONENT: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -109,6 +115,10 @@ NESTEROV_OPTM = base_train.NESTEROV_OPTM
 BEST_MODEL_MONITOR = base_train.BEST_MODEL_MONITOR
 BEST_MODEL_MODE = base_train.BEST_MODEL_MODE
 SAVE_LATEST_CHECKPOINT = base_train.SAVE_LATEST_CHECKPOINT
+EARLY_STOPPING_ENABLED = False
+EARLY_STOPPING_PATIENCE = 20
+EARLY_STOPPING_MIN_DELTA = 0.0
+EARLY_STOPPING_VERBOSE = True
 DEVICE = base_train.DEVICE
 
 REQUIRED_CV_COLUMNS = {
@@ -311,6 +321,7 @@ def save_latest_checkpoint(
     best_metric: float,
     best_epoch: int,
     num_classes: int,
+    early_stopping: EarlyStopping,
 ) -> None:
     """Save the latest independently resumable state for one fold."""
 
@@ -326,7 +337,7 @@ def save_latest_checkpoint(
             "model_state_dict": model.state_dict(),
             "optimizer_state_dict": optimizer.state_dict(),
             "scheduler_state_dict": None,
-            "early_stopping_state_dict": None,
+            "early_stopping_state_dict": early_stopping.state_dict(),
             "train_loss": train_loss,
             "train_accuracy": train_accuracy,
             "val_metrics": val_metrics,
@@ -366,6 +377,8 @@ def build_fold_config(
     config["experiment"].update(
         {
             "type": "stratified_group_5fold_cross_validation",
+            "experiment_id": EXPERIMENT_ID,
+            "component": EXPERIMENT_COMPONENT,
             "run_id": str(RUN_ID),
             "short_run_id": RUN_SHORT_ID,
             "result_directory": RESULT_DIR_NAME,
@@ -395,6 +408,15 @@ def build_fold_config(
             "seed_reset_before_each_fold": True,
         }
     )
+    if EARLY_STOPPING_ENABLED:
+        config["early_stopping"] = {
+            "enabled": True,
+            "monitor": BEST_MODEL_MONITOR,
+            "mode": BEST_MODEL_MODE,
+            "patience": EARLY_STOPPING_PATIENCE,
+            "min_delta": EARLY_STOPPING_MIN_DELTA,
+            "restore_best_weights": True,
+        }
     config["checkpoint"].update(
         {
             "best_model_path": str(paths["best_model"]),
@@ -432,6 +454,8 @@ def build_cv_config(metadata: pd.DataFrame) -> dict[str, object]:
     return {
         "experiment": {
             "type": "stratified_group_5fold_cross_validation",
+            "experiment_id": EXPERIMENT_ID,
+            "component": EXPERIMENT_COMPONENT,
             "run_id": str(RUN_ID),
             "short_run_id": RUN_SHORT_ID,
             "created_at": RUN_STARTED_AT.isoformat(timespec="seconds"),
@@ -490,7 +514,18 @@ def build_cv_config(metadata: pd.DataFrame) -> dict[str, object]:
             "nesterov": NESTEROV_OPTM,
         },
         "scheduler": None,
-        "early_stopping": None,
+        "early_stopping": (
+            {
+                "enabled": True,
+                "monitor": BEST_MODEL_MONITOR,
+                "mode": BEST_MODEL_MODE,
+                "patience": EARLY_STOPPING_PATIENCE,
+                "min_delta": EARLY_STOPPING_MIN_DELTA,
+                "restore_best_weights": True,
+            }
+            if EARLY_STOPPING_ENABLED
+            else None
+        ),
         "device": str(DEVICE),
     }
 
@@ -591,6 +626,16 @@ def run_fold(fold: int) -> tuple[dict[str, object], pd.DataFrame]:
 
     best_metric = float("inf")
     best_epoch = 0
+    early_stopping = EarlyStopping(
+        patience=(
+            EARLY_STOPPING_PATIENCE
+            if EARLY_STOPPING_ENABLED
+            else NUM_EPOCHS + 1
+        ),
+        mode=BEST_MODEL_MODE,
+        min_delta=EARLY_STOPPING_MIN_DELTA,
+        verbose=EARLY_STOPPING_VERBOSE if EARLY_STOPPING_ENABLED else False,
+    )
     training_started_at = time.perf_counter()
     for epoch in range(NUM_EPOCHS):
         _synchronize_device()
@@ -638,6 +683,11 @@ def run_fold(fold: int) -> tuple[dict[str, object], pd.DataFrame]:
                 f"(val_loss: {current_metric:.4f})"
             )
 
+        stopped_early = early_stopping(
+            metric=current_metric,
+            epoch=epoch + 1,
+        )
+
         checkpoint_saved = False
         if SAVE_LATEST_CHECKPOINT:
             save_latest_checkpoint(
@@ -652,6 +702,7 @@ def run_fold(fold: int) -> tuple[dict[str, object], pd.DataFrame]:
                 best_metric=best_metric,
                 best_epoch=best_epoch,
                 num_classes=num_classes,
+                early_stopping=early_stopping,
             )
             checkpoint_saved = True
 
@@ -678,7 +729,7 @@ def run_fold(fold: int) -> tuple[dict[str, object], pd.DataFrame]:
             epoch_time=epoch_time,
             elapsed_time_sec=elapsed_time_sec,
             is_best=is_best,
-            early_stop_counter=0,
+            early_stop_counter=early_stopping.counter,
             gpu_memory_allocated_mb=gpu_memory_allocated_mb,
             train_time_sec=train_time_sec,
             val_time_sec=val_time_sec,
@@ -690,7 +741,7 @@ def run_fold(fold: int) -> tuple[dict[str, object], pd.DataFrame]:
             train_batches=len(train_loader),
             val_batches=len(val_loader),
             gpu_memory_reserved_mb=gpu_memory_reserved_mb,
-            stopped_early=False,
+            stopped_early=stopped_early,
             learning_rate=optimizer.param_groups[0]["lr"],
             train_loss=train_loss,
             train_accuracy=train_accuracy,
@@ -709,6 +760,14 @@ def run_fold(fold: int) -> tuple[dict[str, object], pd.DataFrame]:
         print(f"Validation Accuracy : {val_metrics['accuracy']:.2%}")
         print(f"Validation ROC-AUC  : {val_metrics['auc']:.4f}")
         print()
+
+        if stopped_early:
+            print(
+                f"Fold {fold} stopped early at epoch {epoch + 1}: "
+                f"no {BEST_MODEL_MONITOR} improvement for "
+                f"{EARLY_STOPPING_PATIENCE} epochs."
+            )
+            break
 
     total_training_seconds = time.perf_counter() - training_started_at
     history = pd.read_csv(paths["training_log"])
@@ -779,6 +838,8 @@ def run_fold(fold: int) -> tuple[dict[str, object], pd.DataFrame]:
         "val_benign": val_counts[CLASS_TO_IDX["benign"]],
         "val_malignant": val_counts[CLASS_TO_IDX["malignant"]],
         "best_epoch": best_epoch,
+        "epochs_completed": epoch + 1,
+        "stopped_early": stopped_early,
         "best_val_loss": best_val_metrics["loss"],
         "best_val_accuracy": best_val_metrics["accuracy"],
         "best_sensitivity": best_val_metrics["sensitivity"],
@@ -809,6 +870,8 @@ def build_cv_summary(summary_frame: pd.DataFrame) -> dict[str, object]:
             "maximum": float(summary_frame[metric].max()),
         }
     return {
+        "experiment_id": EXPERIMENT_ID,
+        "component": EXPERIMENT_COMPONENT,
         "experiment_type": "stratified_group_5fold_cross_validation",
         "run_id": str(RUN_ID),
         "num_folds": N_SPLITS,
@@ -882,6 +945,10 @@ def main() -> None:
 
     metadata = validate_cv_metadata()
     OUTPUT_DIR.mkdir(parents=True, exist_ok=False)
+    if CONFIG_SNAPSHOT_SOURCE is not None:
+        if CONFIG_SNAPSHOT_PATH is None:
+            raise RuntimeError("CONFIG_SNAPSHOT_PATH must be configured.")
+        shutil.copy2(CONFIG_SNAPSHOT_SOURCE, CONFIG_SNAPSHOT_PATH)
     CV_FIGURES_DIR.mkdir(parents=False, exist_ok=False)
     save_training_config(build_cv_config(metadata), CV_CONFIG_PATH)
 

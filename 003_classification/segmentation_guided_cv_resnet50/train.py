@@ -4,6 +4,7 @@ from collections import Counter
 from datetime import datetime
 import json
 from pathlib import Path
+import shutil
 import time
 from typing import Any
 from uuid import uuid4
@@ -35,18 +36,52 @@ from .model import SegmentationGuidedResNet50
 from .transforms import build_train_transform, build_val_transform
 
 # ---------------------------------------------------------------------------
-# Project and output
+# JSON configuration
 # ---------------------------------------------------------------------------
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
+CLASSIFICATION_ROOT = Path(__file__).resolve().parents[1]
+CONFIG_PATH = (
+    CLASSIFICATION_ROOT / "configs" / "segmentation_guided_cv_resnet50.json"
+)
+
+with CONFIG_PATH.open("r", encoding="utf-8") as file:
+    CONFIG = json.load(file)
+
+EXPERIMENT_CONFIG = CONFIG["experiment"]
+OUTPUT_CONFIG = CONFIG["output"]
+DATA_CONFIG = CONFIG["data"]
+CV_CONFIG = CONFIG["cross_validation"]
+MODEL_CONFIG = CONFIG["model"]
+TRAINING_CONFIG = CONFIG["training"]
+OPTIMIZER_CONFIG = CONFIG["optimizer"]
+DATALOADER_CONFIG = CONFIG["dataloader"]
+EARLY_STOPPING_CONFIG = CONFIG["early_stopping"]
+CHECKPOINT_CONFIG = CONFIG["checkpoint"]
+
+
+def resolve_project_path(value: str | Path) -> Path:
+    """Resolve configuration paths relative to the repository root."""
+
+    path = Path(value).expanduser()
+    return path.resolve() if path.is_absolute() else (PROJECT_ROOT / path).resolve()
+
+
+# ---------------------------------------------------------------------------
+# Project and output
+# ---------------------------------------------------------------------------
 RUN_STARTED_AT = datetime.now().astimezone()
 RUN_ID = uuid4()
 RUN_SHORT_ID = RUN_ID.hex[:8]
-RESULT_DIR_NAME = f"cv_result_{RUN_STARTED_AT:%Y%m%d_%H%M%S}_{RUN_SHORT_ID}"
+EXPERIMENT_ID = str(EXPERIMENT_CONFIG["id"])
+EXPERIMENT_COMPONENT = str(EXPERIMENT_CONFIG["component"])
+RESULT_DIR_NAME = Path(EXPERIMENT_COMPONENT).name
 OUTPUT_DIR = (
-    PROJECT_ROOT
-    / "classification_results"
-    / "segmentation_guided_cv_resnet50"
-    / RESULT_DIR_NAME
+    resolve_project_path(OUTPUT_CONFIG["root_directory"])
+    / EXPERIMENT_ID
+    / EXPERIMENT_COMPONENT
+)
+CONFIG_SNAPSHOT_PATH = OUTPUT_DIR / str(
+    OUTPUT_CONFIG["config_snapshot_filename"]
 )
 CV_CONFIG_PATH = OUTPUT_DIR / "cv_config.json"
 CV_SUMMARY_PATH = OUTPUT_DIR / "cv_summary.csv"
@@ -58,73 +93,100 @@ CV_FIGURES_DIR = OUTPUT_DIR / "figures"
 # ---------------------------------------------------------------------------
 # Dataset and cross-validation
 # ---------------------------------------------------------------------------
-DATASET_ROOT = PROJECT_ROOT / "000_dataset" / "_segmentation_dataset_v2"
-METADATA_PATH = DATASET_ROOT / "004_classification_cv_5fold_seed42.csv"
-CT_PATH_COLUMN = "ct_windowed_path"
-PROBABILITY_ROOT = (
-    PROJECT_ROOT
-    / "segmentation_results"
-    / "unet_holdout_split"
-    / "dc730a13-5813-4d87-b15c-3b630deb32b5"
-    / "inference"
-    / "probability_npy"
-)
-INPUT_HEIGHT = 224
-INPUT_WIDTH = 224
+DATASET_ROOT = resolve_project_path(DATA_CONFIG["dataset_root"])
+METADATA_PATH = resolve_project_path(DATA_CONFIG["metadata_path"])
+CT_PATH_COLUMN = str(DATA_CONFIG["ct_path_column"])
+PROBABILITY_ROOT = resolve_project_path(DATA_CONFIG["probability_root"])
+INPUT_HEIGHT = int(DATA_CONFIG["input_height"])
+INPUT_WIDTH = int(DATA_CONFIG["input_width"])
 CLASS_TO_IDX = {
-    "benign": 0,
-    "malignant": 1,
+    str(name): int(index)
+    for name, index in DATA_CONFIG["class_to_idx"].items()
 }
-IMAGENET_MEAN = (0.485, 0.456, 0.406)
-IMAGENET_STD = (0.229, 0.224, 0.225)
+IMAGENET_MEAN = tuple(float(value) for value in DATA_CONFIG["normalization_mean"])
+IMAGENET_STD = tuple(float(value) for value in DATA_CONFIG["normalization_std"])
 
-N_SPLITS = 5
+N_SPLITS = int(CV_CONFIG["num_folds"])
 CV_FOLDS = tuple(range(N_SPLITS))
-DEVELOPMENT_ROLE = "development"
-HOLDOUT_ROLE = "holdout_test"
-HOLDOUT_FOLD = -1
+DEVELOPMENT_ROLE = str(CV_CONFIG["development_role"])
+HOLDOUT_ROLE = str(CV_CONFIG["holdout_role"])
+HOLDOUT_FOLD = int(CV_CONFIG["holdout_fold"])
+GROUP_COLUMN = str(CV_CONFIG["group_column"])
+NODULE_COLUMN = str(CV_CONFIG["nodule_column"])
+FOLD_COLUMN = str(CV_CONFIG["fold_column"])
+ROLE_COLUMN = str(CV_CONFIG["role_column"])
+if ROLE_COLUMN != "cv_role" or FOLD_COLUMN != "cv_fold":
+    raise ValueError(
+        "The classification dataset currently requires role_column='cv_role' "
+        "and fold_column='cv_fold'."
+    )
 
-TRAIN_SHUFFLE = True
-VAL_SHUFFLE = False
-TRAIN_DROP_LAST = False
-VAL_DROP_LAST = False
+TRAIN_SHUFFLE = bool(DATALOADER_CONFIG["train_shuffle"])
+VAL_SHUFFLE = bool(DATALOADER_CONFIG["val_shuffle"])
+TRAIN_DROP_LAST = bool(DATALOADER_CONFIG["train_drop_last"])
+VAL_DROP_LAST = bool(DATALOADER_CONFIG["val_drop_last"])
 
 
 # ---------------------------------------------------------------------------
 # Model and training
 # ---------------------------------------------------------------------------
-WEIGHTS = ResNet50_Weights.DEFAULT
-MODEL_ARCHITECTURE = SegmentationGuidedResNet50.architecture_name
-TRAINING_STRATEGY = "full_fine_tuning"
-TRAINABLE_COMPONENT = "entire_model"
-CLASSIFIER_DROPOUT = 0.3
-CLASSIFICATION_THRESHOLD = 0.5
-ATTENTION_FUSION_STAGE = "layer3"
-ATTENTION_FEATURE_CHANNELS = 1024
-ATTENTION_HIDDEN_CHANNELS = 64
-ATTENTION_ALPHA_INITIAL_VALUE = 0.0
+weights_name = str(MODEL_CONFIG["pretrained_weights"])
+if weights_name == "DEFAULT":
+    WEIGHTS = ResNet50_Weights.DEFAULT
+elif weights_name == "IMAGENET1K_V2":
+    WEIGHTS = ResNet50_Weights.IMAGENET1K_V2
+elif weights_name == "NONE":
+    WEIGHTS = None
+else:
+    raise ValueError(f"Unsupported pretrained_weights: {weights_name}")
 
-NUM_WORKERS = 8
-PERSISTENT_WORKERS = True
-PREFETCH_FACTOR = 2
-PIN_MEMORY = torch.cuda.is_available()
+MODEL_ARCHITECTURE = str(MODEL_CONFIG["architecture"])
+if MODEL_ARCHITECTURE != SegmentationGuidedResNet50.architecture_name:
+    raise ValueError(f"Unsupported model architecture: {MODEL_ARCHITECTURE}")
+TRAINING_STRATEGY = str(MODEL_CONFIG["training_strategy"])
+TRAINABLE_COMPONENT = str(MODEL_CONFIG["trainable_component"])
+CLASSIFIER_DROPOUT = float(MODEL_CONFIG["classifier_dropout"])
+ATTENTION_FUSION_STAGE = str(MODEL_CONFIG["attention_fusion_stage"])
+ATTENTION_FEATURE_CHANNELS = int(MODEL_CONFIG["attention_feature_channels"])
+ATTENTION_HIDDEN_CHANNELS = int(MODEL_CONFIG["attention_hidden_channels"])
+ATTENTION_ALPHA_INITIAL_VALUE = float(
+    MODEL_CONFIG["attention_alpha_initial_value"]
+)
 
-SEED = 42
-TRANSFORM_SEED = 42
-LEARNING_RATE = 1e-3
-BATCH_SIZE = 32
-NUM_EPOCHS = 100
-WEIGHT_DECAY_OPTM = 1e-4
-MOMENTUM_OPTM = 0.9
-NESTEROV_OPTM = False
+NUM_WORKERS = int(DATALOADER_CONFIG["num_workers"])
+PERSISTENT_WORKERS = bool(DATALOADER_CONFIG["persistent_workers"])
+PREFETCH_FACTOR = int(DATALOADER_CONFIG["prefetch_factor"])
+PIN_MEMORY = bool(DATALOADER_CONFIG["pin_memory"]) and torch.cuda.is_available()
 
-BEST_MODEL_MONITOR = "val_loss"
-BEST_MODEL_MODE = "min"
-SAVE_LATEST_CHECKPOINT = True
-EARLY_STOPPING_PATIENCE = 20
-EARLY_STOPPING_MIN_DELTA = 0.0
-EARLY_STOPPING_VERBOSE = True
-DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+SEED = int(TRAINING_CONFIG["seed"])
+TRANSFORM_SEED = int(TRAINING_CONFIG["transform_seed"])
+LEARNING_RATE = float(TRAINING_CONFIG["learning_rate"])
+BATCH_SIZE = int(TRAINING_CONFIG["batch_size"])
+NUM_EPOCHS = int(TRAINING_CONFIG["num_epochs"])
+CLASSIFICATION_THRESHOLD = float(TRAINING_CONFIG["classification_threshold"])
+WEIGHT_DECAY_OPTM = float(OPTIMIZER_CONFIG["weight_decay"])
+MOMENTUM_OPTM = float(OPTIMIZER_CONFIG["momentum"])
+NESTEROV_OPTM = bool(OPTIMIZER_CONFIG["nesterov"])
+if str(OPTIMIZER_CONFIG["name"]).upper() != "SGD":
+    raise ValueError("Only the SGD optimizer is supported.")
+
+BEST_MODEL_MONITOR = str(EARLY_STOPPING_CONFIG["monitor"])
+BEST_MODEL_MODE = str(EARLY_STOPPING_CONFIG["mode"])
+SAVE_LATEST_CHECKPOINT = bool(CHECKPOINT_CONFIG["save_latest"])
+EARLY_STOPPING_PATIENCE = int(EARLY_STOPPING_CONFIG["patience"])
+EARLY_STOPPING_MIN_DELTA = float(EARLY_STOPPING_CONFIG["min_delta"])
+EARLY_STOPPING_VERBOSE = bool(EARLY_STOPPING_CONFIG["verbose"])
+if not bool(EARLY_STOPPING_CONFIG["enabled"]):
+    raise ValueError("This training pipeline requires early stopping to be enabled.")
+if not bool(EARLY_STOPPING_CONFIG["restore_best_weights"]):
+    raise ValueError("restore_best_weights must be true for fold evaluation.")
+
+device_name = str(TRAINING_CONFIG["device"])
+if device_name == "auto":
+    device_name = "cuda" if torch.cuda.is_available() else "cpu"
+if device_name == "cuda" and not torch.cuda.is_available():
+    raise RuntimeError("CUDA is configured but unavailable.")
+DEVICE = torch.device(device_name)
 
 REQUIRED_CV_COLUMNS = {
     "dataset",
@@ -133,10 +195,10 @@ REQUIRED_CV_COLUMNS = {
     CT_PATH_COLUMN,
     "label",
     "split",
-    "cv_group_id",
-    "cv_nodule_id",
-    "cv_role",
-    "cv_fold",
+    GROUP_COLUMN,
+    NODULE_COLUMN,
+    ROLE_COLUMN,
+    FOLD_COLUMN,
 }
 
 SUMMARY_METRICS = (
@@ -169,49 +231,53 @@ def validate_cv_metadata() -> pd.DataFrame:
         raise ValueError("CV metadata contains duplicate dataset/filename rows.")
 
     metadata = metadata.copy()
-    metadata["cv_role"] = metadata["cv_role"].astype(str).str.strip().str.lower()
-    numeric_folds = pd.to_numeric(metadata["cv_fold"], errors="coerce")
+    metadata[ROLE_COLUMN] = (
+        metadata[ROLE_COLUMN].astype(str).str.strip().str.lower()
+    )
+    numeric_folds = pd.to_numeric(metadata[FOLD_COLUMN], errors="coerce")
     if (
         numeric_folds.isna().any()
         or not (numeric_folds == numeric_folds.astype(int)).all()
     ):
         raise ValueError("cv_fold values must be integers.")
-    metadata["cv_fold"] = numeric_folds.astype(int)
+    metadata[FOLD_COLUMN] = numeric_folds.astype(int)
 
     expected_roles = {DEVELOPMENT_ROLE, HOLDOUT_ROLE}
-    observed_roles = set(metadata["cv_role"].unique())
+    observed_roles = set(metadata[ROLE_COLUMN].unique())
     if observed_roles != expected_roles:
         raise ValueError(
             f"Expected cv roles {expected_roles}, observed {observed_roles}."
         )
 
-    development = metadata[metadata["cv_role"].eq(DEVELOPMENT_ROLE)]
-    holdout = metadata[metadata["cv_role"].eq(HOLDOUT_ROLE)]
-    observed_folds = set(development["cv_fold"].unique())
+    development = metadata[metadata[ROLE_COLUMN].eq(DEVELOPMENT_ROLE)]
+    holdout = metadata[metadata[ROLE_COLUMN].eq(HOLDOUT_ROLE)]
+    observed_folds = set(development[FOLD_COLUMN].unique())
     if observed_folds != set(CV_FOLDS):
         raise ValueError(
             f"Expected development folds {set(CV_FOLDS)}, "
             f"observed {observed_folds}."
         )
-    if not holdout["cv_fold"].eq(HOLDOUT_FOLD).all():
-        raise ValueError("Every holdout row must have cv_fold = -1.")
+    if not holdout[FOLD_COLUMN].eq(HOLDOUT_FOLD).all():
+        raise ValueError(
+            f"Every holdout row must have {FOLD_COLUMN} = {HOLDOUT_FOLD}."
+        )
 
-    development_groups = set(development["cv_group_id"])
-    holdout_groups = set(holdout["cv_group_id"])
+    development_groups = set(development[GROUP_COLUMN])
+    holdout_groups = set(holdout[GROUP_COLUMN])
     group_overlap = development_groups & holdout_groups
     if group_overlap:
         raise RuntimeError(
             "Patient leakage exists between development and holdout data."
         )
-    if development.groupby("cv_group_id")["cv_fold"].nunique().ne(1).any():
+    if development.groupby(GROUP_COLUMN)[FOLD_COLUMN].nunique().ne(1).any():
         raise RuntimeError("A development patient appears in multiple folds.")
-    if development.groupby("cv_nodule_id")["cv_fold"].nunique().ne(1).any():
+    if development.groupby(NODULE_COLUMN)[FOLD_COLUMN].nunique().ne(1).any():
         raise RuntimeError("A development nodule appears in multiple folds.")
 
     expected_labels = {label.lower() for label in CLASS_TO_IDX}
     expected_datasets = set(development["dataset"].astype(str).unique())
     for fold in CV_FOLDS:
-        fold_frame = development[development["cv_fold"].eq(fold)]
+        fold_frame = development[development[FOLD_COLUMN].eq(fold)]
         fold_labels = set(fold_frame["label"].astype(str).str.lower())
         fold_datasets = set(fold_frame["dataset"].astype(str))
         if fold_labels != expected_labels:
@@ -287,16 +353,16 @@ def assert_fold_isolation(
     val_metadata = val_loader.dataset.metadata
     if train_metadata.empty or val_metadata.empty:
         raise ValueError(f"Fold {fold} has an empty train or validation set.")
-    if not train_metadata["cv_role"].eq(DEVELOPMENT_ROLE).all():
+    if not train_metadata[ROLE_COLUMN].eq(DEVELOPMENT_ROLE).all():
         raise RuntimeError("Training data must only contain development rows.")
-    if not val_metadata["cv_role"].eq(DEVELOPMENT_ROLE).all():
+    if not val_metadata[ROLE_COLUMN].eq(DEVELOPMENT_ROLE).all():
         raise RuntimeError("Validation data must only contain development rows.")
-    if not train_metadata["cv_fold"].ne(fold).all():
+    if not train_metadata[FOLD_COLUMN].ne(fold).all():
         raise RuntimeError(f"Fold {fold} leaked into its training partition.")
-    if not val_metadata["cv_fold"].eq(fold).all():
+    if not val_metadata[FOLD_COLUMN].eq(fold).all():
         raise RuntimeError("Validation rows do not match the selected fold.")
 
-    isolation_columns = ("cv_group_id", "cv_nodule_id", "filename")
+    isolation_columns = (GROUP_COLUMN, NODULE_COLUMN, "filename")
     for column in isolation_columns:
         overlap = set(train_metadata[column]) & set(val_metadata[column])
         if overlap:
@@ -391,6 +457,8 @@ def build_fold_config(
     config["experiment"].update(
         {
             "type": "stratified_group_5fold_cross_validation",
+            "experiment_id": EXPERIMENT_ID,
+            "component": EXPERIMENT_COMPONENT,
             "run_id": str(RUN_ID),
             "short_run_id": RUN_SHORT_ID,
             "result_directory": RESULT_DIR_NAME,
@@ -409,9 +477,18 @@ def build_fold_config(
             "val_split": None,
             "cv_role": DEVELOPMENT_ROLE,
             "validation_fold": fold,
-            "train_filter": f"cv_role == development and cv_fold != {fold}",
-            "validation_filter": (f"cv_role == development and cv_fold == {fold}"),
-            "holdout_filter": "cv_role == holdout_test and cv_fold == -1",
+            "train_filter": (
+                f"{ROLE_COLUMN} == {DEVELOPMENT_ROLE} and "
+                f"{FOLD_COLUMN} != {fold}"
+            ),
+            "validation_filter": (
+                f"{ROLE_COLUMN} == {DEVELOPMENT_ROLE} and "
+                f"{FOLD_COLUMN} == {fold}"
+            ),
+            "holdout_filter": (
+                f"{ROLE_COLUMN} == {HOLDOUT_ROLE} and "
+                f"{FOLD_COLUMN} == {HOLDOUT_FOLD}"
+            ),
         }
     )
     config["training"].update(
@@ -439,10 +516,10 @@ def build_fold_config(
         "method": "StratifiedGroupKFold",
         "fold": fold,
         "all_folds": list(CV_FOLDS),
-        "group_column": "cv_group_id",
-        "nodule_column": "cv_nodule_id",
-        "role_column": "cv_role",
-        "fold_column": "cv_fold",
+        "group_column": GROUP_COLUMN,
+        "nodule_column": NODULE_COLUMN,
+        "role_column": ROLE_COLUMN,
+        "fold_column": FOLD_COLUMN,
         "holdout_used_during_training": False,
     }
     config["model"].update(
@@ -464,21 +541,23 @@ def build_fold_config(
 def build_cv_config(metadata: pd.DataFrame) -> dict[str, object]:
     """Build the root-level configuration shared by all five folds."""
 
-    development = metadata[metadata["cv_role"].eq(DEVELOPMENT_ROLE)]
-    holdout = metadata[metadata["cv_role"].eq(HOLDOUT_ROLE)]
+    development = metadata[metadata[ROLE_COLUMN].eq(DEVELOPMENT_ROLE)]
+    holdout = metadata[metadata[ROLE_COLUMN].eq(HOLDOUT_ROLE)]
     fold_distribution = {}
     for fold in CV_FOLDS:
-        fold_frame = development[development["cv_fold"].eq(fold)]
+        fold_frame = development[development[FOLD_COLUMN].eq(fold)]
         fold_distribution[str(fold)] = {
             "slices": len(fold_frame),
-            "nodules": fold_frame["cv_nodule_id"].nunique(),
-            "patients": fold_frame["cv_group_id"].nunique(),
+            "nodules": fold_frame[NODULE_COLUMN].nunique(),
+            "patients": fold_frame[GROUP_COLUMN].nunique(),
             "labels": fold_frame["label"].value_counts().to_dict(),
         }
 
     return {
         "experiment": {
             "type": "stratified_group_5fold_cross_validation",
+            "experiment_id": EXPERIMENT_ID,
+            "component": EXPERIMENT_COMPONENT,
             "run_id": str(RUN_ID),
             "short_run_id": RUN_SHORT_ID,
             "created_at": RUN_STARTED_AT.isoformat(timespec="seconds"),
@@ -489,13 +568,19 @@ def build_cv_config(metadata: pd.DataFrame) -> dict[str, object]:
             "folds": list(CV_FOLDS),
             "random_seed": SEED,
             "metadata_path": str(METADATA_PATH),
-            "group_column": "cv_group_id",
-            "nodule_column": "cv_nodule_id",
-            "fold_column": "cv_fold",
-            "role_column": "cv_role",
-            "train_rule": "development rows whose cv_fold != validation fold",
-            "validation_rule": ("development rows whose cv_fold == validation fold"),
-            "holdout_rule": "holdout_test rows with cv_fold == -1",
+            "group_column": GROUP_COLUMN,
+            "nodule_column": NODULE_COLUMN,
+            "fold_column": FOLD_COLUMN,
+            "role_column": ROLE_COLUMN,
+            "train_rule": (
+                f"{DEVELOPMENT_ROLE} rows whose {FOLD_COLUMN} != validation fold"
+            ),
+            "validation_rule": (
+                f"{DEVELOPMENT_ROLE} rows whose {FOLD_COLUMN} == validation fold"
+            ),
+            "holdout_rule": (
+                f"{HOLDOUT_ROLE} rows with {FOLD_COLUMN} == {HOLDOUT_FOLD}"
+            ),
             "holdout_used_during_cv": False,
             "fold_distribution": fold_distribution,
         },
@@ -506,11 +591,11 @@ def build_cv_config(metadata: pd.DataFrame) -> dict[str, object]:
             "input_size": [INPUT_HEIGHT, INPUT_WIDTH, 4],
             "class_to_idx": CLASS_TO_IDX,
             "development_slices": len(development),
-            "development_nodules": development["cv_nodule_id"].nunique(),
-            "development_patients": development["cv_group_id"].nunique(),
+            "development_nodules": development[NODULE_COLUMN].nunique(),
+            "development_patients": development[GROUP_COLUMN].nunique(),
             "holdout_slices": len(holdout),
-            "holdout_nodules": holdout["cv_nodule_id"].nunique(),
-            "holdout_patients": holdout["cv_group_id"].nunique(),
+            "holdout_nodules": holdout[NODULE_COLUMN].nunique(),
+            "holdout_patients": holdout[GROUP_COLUMN].nunique(),
         },
         "model": {
             "architecture": MODEL_ARCHITECTURE,
@@ -574,11 +659,11 @@ def build_validation_predictions(
         "dataset",
         "patient_id",
         "filename",
-        "cv_group_id",
-        "cv_nodule_id",
+        GROUP_COLUMN,
+        NODULE_COLUMN,
         "label",
-        "cv_role",
-        "cv_fold",
+        ROLE_COLUMN,
+        FOLD_COLUMN,
     ]
     frame = dataset.metadata[columns].reset_index(drop=True).copy()
     frame.insert(0, "validation_fold", fold)
@@ -644,8 +729,8 @@ def run_fold(fold: int) -> tuple[dict[str, object], pd.DataFrame]:
     print("=" * 76)
     print(f"Train samples      : {len(train_dataset)}")
     print(f"Validation samples : {len(val_dataset)}")
-    print(f"Train patients     : {train_dataset.metadata['cv_group_id'].nunique()}")
-    print(f"Validation patients: {val_dataset.metadata['cv_group_id'].nunique()}")
+    print(f"Train patients     : {train_dataset.metadata[GROUP_COLUMN].nunique()}")
+    print(f"Validation patients: {val_dataset.metadata[GROUP_COLUMN].nunique()}")
     print(f"Learning rate      : {LEARNING_RATE:.3e} (constant)")
     print(f"Optimizer          : SGD (momentum={MOMENTUM_OPTM:.1f})")
     print(f"Device             : {DEVICE}")
@@ -847,10 +932,10 @@ def run_fold(fold: int) -> tuple[dict[str, object], pd.DataFrame]:
         "status": "completed",
         "train_samples": len(train_dataset),
         "val_samples": len(val_dataset),
-        "train_patients": train_dataset.metadata["cv_group_id"].nunique(),
-        "val_patients": val_dataset.metadata["cv_group_id"].nunique(),
-        "train_nodules": train_dataset.metadata["cv_nodule_id"].nunique(),
-        "val_nodules": val_dataset.metadata["cv_nodule_id"].nunique(),
+        "train_patients": train_dataset.metadata[GROUP_COLUMN].nunique(),
+        "val_patients": val_dataset.metadata[GROUP_COLUMN].nunique(),
+        "train_nodules": train_dataset.metadata[NODULE_COLUMN].nunique(),
+        "val_nodules": val_dataset.metadata[NODULE_COLUMN].nunique(),
         "train_benign": train_counts[CLASS_TO_IDX["benign"]],
         "train_malignant": train_counts[CLASS_TO_IDX["malignant"]],
         "val_benign": val_counts[CLASS_TO_IDX["benign"]],
@@ -888,6 +973,8 @@ def build_cv_summary(summary_frame: pd.DataFrame) -> dict[str, object]:
             "maximum": float(summary_frame[metric].max()),
         }
     return {
+        "experiment_id": EXPERIMENT_ID,
+        "component": EXPERIMENT_COMPONENT,
         "experiment_type": "stratified_group_5fold_cross_validation",
         "run_id": str(RUN_ID),
         "num_folds": N_SPLITS,
@@ -939,7 +1026,7 @@ def validate_oof_predictions(
 ) -> None:
     """Ensure every development slice has exactly one OOF prediction."""
 
-    development = metadata[metadata["cv_role"].eq(DEVELOPMENT_ROLE)]
+    development = metadata[metadata[ROLE_COLUMN].eq(DEVELOPMENT_ROLE)]
     if len(predictions) != len(development):
         raise RuntimeError(
             "Out-of-fold prediction count does not equal development rows."
@@ -961,13 +1048,17 @@ def main() -> None:
 
     metadata = validate_cv_metadata()
     OUTPUT_DIR.mkdir(parents=True, exist_ok=False)
+    shutil.copy2(CONFIG_PATH, CONFIG_SNAPSHOT_PATH)
     CV_FIGURES_DIR.mkdir(parents=False, exist_ok=False)
     save_training_config(build_cv_config(metadata), CV_CONFIG_PATH)
 
     print("Segmentation-Guided ResNet-50 — Stratified Group 5-Fold CV")
     print(f"Metadata            : {METADATA_PATH}")
-    print(f"Development samples : {(metadata.cv_role == DEVELOPMENT_ROLE).sum()}")
-    print(f"Holdout samples     : {(metadata.cv_role == HOLDOUT_ROLE).sum()}")
+    print(
+        f"Development samples : "
+        f"{metadata[ROLE_COLUMN].eq(DEVELOPMENT_ROLE).sum()}"
+    )
+    print(f"Holdout samples     : {metadata[ROLE_COLUMN].eq(HOLDOUT_ROLE).sum()}")
     print(f"Folds               : {list(CV_FOLDS)}")
     print(f"Epochs per fold     : {NUM_EPOCHS}")
     print(f"Batch size          : {BATCH_SIZE}")

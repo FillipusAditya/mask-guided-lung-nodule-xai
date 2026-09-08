@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import time
 from datetime import datetime
 from pathlib import Path
@@ -36,25 +37,57 @@ from .transforms import build_val_transform
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 CLASSIFICATION_THRESHOLD = 0.5
-
-
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        description="Evaluate a segmentation-guided five-fold ResNet-50 ensemble."
-    )
-    parser.add_argument("result_dir", type=Path, help="Completed CV result directory.")
-    parser.add_argument("--batch-size", type=int, default=4)
-    parser.add_argument("--num-workers", type=int, default=4)
-    parser.add_argument("--device", choices=("auto", "cpu", "cuda"), default="auto")
-    parser.add_argument("--max-samples", type=int, default=None)
-    parser.add_argument("--dpi", type=int, default=180)
-    return parser.parse_args()
+CONFIG_PATH = (
+    PROJECT_ROOT
+    / "003_classification"
+    / "configs"
+    / "segmentation_guided_cv_resnet50.json"
+)
+DEFAULT_DATASET_ROOT = PROJECT_ROOT / "000_dataset/_segmentation_dataset_v2"
+SAMPLE_FILENAME_PATTERN = re.compile(
+    r"^(?P<study>.+)_(?P<nodule_kind>finding|cluster)_"
+    r"(?P<nodule_number>\d+)_slice_(?P<slice_index>\d+)\.npy$"
+)
 
 
 def resolve_path(path: str | Path) -> Path:
     path = Path(path).expanduser()
     return path.resolve() if path.is_absolute() else (PROJECT_ROOT / path).resolve()
 
+
+with CONFIG_PATH.open("r", encoding="utf-8") as file:
+    DEFAULT_CONFIG = json.load(file)
+
+DEFAULT_RESULT_DIR = (
+    resolve_path(DEFAULT_CONFIG["output"]["root_directory"])
+    / str(DEFAULT_CONFIG["experiment"]["id"])
+    / str(DEFAULT_CONFIG["experiment"]["component"])
+)
+DEFAULT_SEGMENTATION_RUN_DIR = resolve_path(
+    DEFAULT_CONFIG["data"]["probability_root"]
+).parents[1]
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Evaluate a segmentation-guided five-fold ResNet-50 ensemble."
+    )
+    parser.add_argument(
+        "result_dir",
+        type=Path,
+        nargs="?",
+        default=DEFAULT_RESULT_DIR,
+        help=(
+            "Completed CV result directory. Defaults to the experiment and "
+            "component selected in the JSON configuration."
+        ),
+    )
+    parser.add_argument("--batch-size", type=int, default=4)
+    parser.add_argument("--num-workers", type=int, default=4)
+    parser.add_argument("--device", choices=("auto", "cpu", "cuda"), default="auto")
+    parser.add_argument("--max-samples", type=int, default=None)
+    parser.add_argument("--dpi", type=int, default=120)
+    return parser.parse_args()
 
 def select_device(requested: str) -> torch.device:
     if requested == "cuda" and not torch.cuda.is_available():
@@ -75,6 +108,66 @@ def load_fold_config(result_dir: Path) -> dict[str, Any]:
         != SegmentationGuidedResNet50.architecture_name
     ):
         raise ValueError("The result directory is not a segmentation-guided ResNet-50 run.")
+    return config
+
+
+def relocate_colab_data_paths(
+    config: dict[str, Any],
+    result_dir: Path,
+) -> dict[str, Any]:
+    """Replace unavailable absolute Colab paths with their local equivalents."""
+
+    config = dict(config)
+    data = dict(config["data"])
+
+    configured_dataset_root = resolve_path(data["dataset_root"])
+    dataset_candidates = (configured_dataset_root, DEFAULT_DATASET_ROOT)
+    dataset_root = next(
+        (path.resolve() for path in dataset_candidates if path.is_dir()),
+        None,
+    )
+    if dataset_root is None:
+        raise FileNotFoundError(
+            "Dataset root was not found. Checked: "
+            + ", ".join(str(path) for path in dataset_candidates)
+        )
+
+    configured_metadata_path = resolve_path(data["metadata_path"])
+    metadata_candidates = (
+        configured_metadata_path,
+        dataset_root / configured_metadata_path.name,
+    )
+    metadata_path = next(
+        (path.resolve() for path in metadata_candidates if path.is_file()),
+        None,
+    )
+    if metadata_path is None:
+        raise FileNotFoundError(
+            "CV metadata was not found. Checked: "
+            + ", ".join(str(path) for path in metadata_candidates)
+        )
+
+    configured_probability_root = resolve_path(data["probability_root"])
+    probability_candidates = (
+        configured_probability_root,
+        result_dir.parent / "inference/probability_npy",
+        result_dir.parents[1] / "segmentation/unet/inference/probability_npy",
+        DEFAULT_SEGMENTATION_RUN_DIR / "inference/probability_npy",
+    )
+    probability_root = next(
+        (path.resolve() for path in probability_candidates if path.is_dir()),
+        None,
+    )
+    if probability_root is None:
+        raise FileNotFoundError(
+            "U-Net probability-map directory was not found. Checked: "
+            + ", ".join(str(path) for path in probability_candidates)
+        )
+
+    data["dataset_root"] = str(dataset_root)
+    data["metadata_path"] = str(metadata_path)
+    data["probability_root"] = str(probability_root)
+    config["data"] = data
     return config
 
 
@@ -103,6 +196,18 @@ def build_test_loader(
         },
         ct_path_column=str(data["ct_path_column"]),
     )
+    if "mask_path" not in dataset.metadata.columns:
+        raise ValueError("Test metadata must contain the mask_path column.")
+    missing_masks = [
+        resolve_metadata_path(dataset.root_dir, value)
+        for value in dataset.metadata["mask_path"]
+        if not resolve_metadata_path(dataset.root_dir, value).is_file()
+    ]
+    if missing_masks:
+        preview = ", ".join(str(path) for path in missing_masks[:5])
+        raise FileNotFoundError(
+            f"Missing {len(missing_masks)} ground-truth masks; examples: {preview}"
+        )
     if max_samples is not None:
         if max_samples <= 0:
             raise ValueError("--max-samples must be positive.")
@@ -237,43 +342,302 @@ def normalize_ct(image: np.ndarray) -> np.ndarray:
     return np.clip((image - lower) / (upper - lower), 0.0, 1.0)
 
 
-def save_xai_figure(
-    ct: np.ndarray,
-    probability_map: np.ndarray,
-    gradcam: np.ndarray,
-    lrp: np.ndarray,
-    title: str,
+def resize_map_for_display(
+    values: np.ndarray,
+    target_shape: tuple[int, int],
+) -> np.ndarray:
+    """Resize a model-space map to the original CT grid for aligned plotting."""
+
+    values = np.asarray(values, dtype=np.float32)
+    if values.ndim != 2:
+        raise ValueError(f"Expected a 2D map, got shape {values.shape}.")
+    if values.shape == target_shape:
+        return values
+    resized = F.interpolate(
+        torch.from_numpy(values)[None, None],
+        size=target_shape,
+        mode="bilinear",
+        align_corners=False,
+    )
+    return resized[0, 0].numpy()
+
+
+def resize_mask_for_display(
+    values: np.ndarray,
+    target_shape: tuple[int, int],
+) -> np.ndarray:
+    """Resize a binary mask without introducing interpolated class values."""
+
+    values = np.asarray(values, dtype=np.float32)
+    if values.ndim != 2:
+        raise ValueError(f"Expected a 2D mask, got shape {values.shape}.")
+    if values.shape != target_shape:
+        values = F.interpolate(
+            torch.from_numpy(values)[None, None],
+            size=target_shape,
+            mode="nearest",
+        )[0, 0].numpy()
+    return values >= 0.5
+
+
+def parse_sample_identifiers(filename: str) -> tuple[str, str, int]:
+    """Return study, nodule, and slice identifiers from a dataset filename."""
+
+    match = SAMPLE_FILENAME_PATTERN.fullmatch(Path(filename).name)
+    if match is None:
+        raise ValueError(f"Unsupported segmentation sample filename: {filename}")
+    nodule = f"{match.group('nodule_kind')}_{match.group('nodule_number')}"
+    return match.group("study"), nodule, int(match.group("slice_index"))
+
+
+def resolve_metadata_path(root_dir: Path, value: object) -> Path:
+    """Resolve an absolute or dataset-relative path stored in metadata."""
+
+    path = Path(str(value))
+    return path if path.is_absolute() else root_dir / path
+
+
+def load_display_array(path: Path, description: str) -> np.ndarray:
+    """Load and validate one two-dimensional visualization source."""
+
+    if not path.is_file():
+        raise FileNotFoundError(f"{description} not found: {path}")
+    values = np.load(path, allow_pickle=False)
+    if values.ndim != 2:
+        raise ValueError(
+            f"Expected a 2D {description}, got shape {values.shape}: {path}"
+        )
+    if not np.isfinite(values).all():
+        raise ValueError(f"Non-finite values in {description}: {path}")
+    return values
+
+
+def save_study_figure(
+    study_id: str,
+    study_frame: pd.DataFrame,
+    dataset_root: Path,
+    ct_path_column: str,
+    probability_root: Path,
+    gradcam_npy_dir: Path,
+    lrp_npy_dir: Path,
     save_path: Path,
     dpi: int,
 ) -> None:
-    display = normalize_ct(ct)
-    figure, axes = plt.subplots(2, 3, figsize=(15, 9), facecolor="#f6f7fb")
-    panels = (
-        (display, "gray", "Lung-parenchyma CT", 0.0, 1.0),
-        (probability_map, "magma", "U-Net probability map", 0.0, 1.0),
-        (gradcam, "jet", "Grad-CAM", 0.0, 1.0),
-        (display, "gray", "Grad-CAM overlay", 0.0, 1.0),
-        (lrp, "seismic", "LRP relevance", -1.0, 1.0),
-        (display, "gray", "LRP overlay", 0.0, 1.0),
+    """Save every nodule and slice from one study in a single PNG."""
+
+    nodule_groups = list(study_frame.groupby("xai_nodule", sort=False))
+    total_slices = len(study_frame)
+    section_heights = [max(1, len(frame)) for _, frame in nodule_groups]
+    figure_height = max(5.0, 1.2 + total_slices * 2.35 + len(nodule_groups) * 0.5)
+    figure = plt.figure(
+        figsize=(18, figure_height),
+        facecolor="#f6f7fb",
+        layout="constrained",
     )
-    panel_images = []
-    for axis, (array, cmap, panel_title, vmin, vmax) in zip(axes.flat, panels):
-        panel_images.append(axis.imshow(array, cmap=cmap, vmin=vmin, vmax=vmax))
-        axis.set_title(panel_title, weight="bold")
-        axis.axis("off")
-    axes[1, 0].imshow(gradcam, cmap="jet", alpha=0.45, vmin=0.0, vmax=1.0)
-    axes[1, 2].imshow(lrp, cmap="seismic", alpha=0.50, vmin=-1.0, vmax=1.0)
-    for index in (1, 2, 4):
-        figure.colorbar(
-            panel_images[index],
-            ax=axes.flat[index],
-            fraction=0.046,
-            pad=0.025,
+    sections = figure.subfigures(
+        len(nodule_groups),
+        1,
+        squeeze=False,
+        height_ratios=section_heights,
+    )
+    column_titles = (
+        "Full CT scan",
+        "Ground-truth nodule mask",
+        "U-Net probability heatmap",
+        "Grad-CAM overlay",
+        "LRP overlay",
+    )
+
+    for section, (nodule_id, nodule_frame) in zip(
+        sections.flat, nodule_groups, strict=True
+    ):
+        nodule_frame = nodule_frame.sort_values("xai_slice_index")
+        labels = ", ".join(sorted(nodule_frame["label"].astype(str).unique()))
+        section.suptitle(
+            f"Nodule section: {nodule_id}  |  Label: {labels}  |  "
+            f"Slices: {len(nodule_frame)}",
+            fontsize=14,
+            weight="bold",
         )
-    figure.suptitle(title, fontsize=12, weight="bold")
-    figure.tight_layout(rect=(0, 0, 1, 0.96))
-    figure.savefig(save_path, dpi=dpi, bbox_inches="tight", facecolor=figure.get_facecolor())
+        axes = section.subplots(len(nodule_frame), 5, squeeze=False)
+        probability_artists = []
+
+        for row_index, (_, row) in enumerate(nodule_frame.iterrows()):
+            filename = Path(str(row["filename"])).name
+            ct = load_display_array(
+                resolve_metadata_path(dataset_root, row[ct_path_column]),
+                "CT scan",
+            )
+            mask = load_display_array(
+                resolve_metadata_path(dataset_root, row["mask_path"]),
+                "ground-truth mask",
+            )
+            probability = load_display_array(
+                probability_root / filename,
+                "U-Net probability map",
+            )
+            gradcam = load_display_array(
+                gradcam_npy_dir / filename,
+                "Grad-CAM map",
+            )
+            lrp = load_display_array(lrp_npy_dir / filename, "LRP map")
+
+            display = normalize_ct(ct)
+            display_shape = tuple(int(value) for value in display.shape)
+            mask_display = resize_mask_for_display(mask, display_shape)
+            probability_display = resize_map_for_display(
+                probability, display_shape
+            )
+            gradcam_display = resize_map_for_display(gradcam, display_shape)
+            lrp_display = resize_map_for_display(lrp, display_shape)
+
+            row_axes = axes[row_index]
+            row_axes[0].imshow(
+                display,
+                cmap="gray",
+                vmin=0.0,
+                vmax=1.0,
+                interpolation="bilinear",
+            )
+            row_axes[1].imshow(
+                mask_display,
+                cmap="gray",
+                vmin=0.0,
+                vmax=1.0,
+                interpolation="nearest",
+            )
+            probability_artists.append(
+                row_axes[2].imshow(
+                    probability_display,
+                    cmap="magma",
+                    vmin=0.0,
+                    vmax=1.0,
+                    interpolation="bilinear",
+                )
+            )
+            row_axes[3].imshow(
+                display,
+                cmap="gray",
+                vmin=0.0,
+                vmax=1.0,
+                interpolation="bilinear",
+            )
+            row_axes[3].imshow(
+                gradcam_display,
+                cmap="jet",
+                alpha=0.45,
+                vmin=0.0,
+                vmax=1.0,
+                interpolation="bilinear",
+            )
+            row_axes[4].imshow(
+                display,
+                cmap="gray",
+                vmin=0.0,
+                vmax=1.0,
+                interpolation="bilinear",
+            )
+            row_axes[4].imshow(
+                lrp_display,
+                cmap="seismic",
+                alpha=0.50,
+                vmin=-1.0,
+                vmax=1.0,
+                interpolation="bilinear",
+            )
+
+            if row_index == 0:
+                for axis, column_title in zip(
+                    row_axes, column_titles, strict=True
+                ):
+                    axis.set_title(
+                        column_title, fontsize=11, weight="bold", pad=8
+                    )
+
+            prediction_probability = float(
+                row[f"probability_{str(row['predicted_class']).lower()}"]
+            )
+            row_axes[0].text(
+                -0.04,
+                0.5,
+                f"Slice {int(row['xai_slice_index'])}\n"
+                f"Pred: {row['predicted_class']}\n"
+                f"p={prediction_probability:.3f}",
+                transform=row_axes[0].transAxes,
+                ha="right",
+                va="center",
+                fontsize=9,
+                weight="bold",
+            )
+            for axis in row_axes:
+                axis.axis("off")
+
+        section.colorbar(
+            probability_artists[0],
+            ax=axes[:, 2].tolist(),
+            fraction=0.018,
+            pad=0.012,
+            shrink=0.88,
+            label="Nodule probability",
+        )
+
+    figure.suptitle(
+        f"Study: {study_id}  |  Nodules: {len(nodule_groups)}  |  "
+        f"Slices: {total_slices}",
+        fontsize=16,
+        weight="bold",
+    )
+    figure.savefig(
+        save_path,
+        dpi=dpi,
+        bbox_inches="tight",
+        facecolor=figure.get_facecolor(),
+    )
     plt.close(figure)
+
+
+def save_study_visualizations(
+    predictions: pd.DataFrame,
+    dataset: ProbabilityGuidedClassificationDataset,
+    gradcam_npy_dir: Path,
+    lrp_npy_dir: Path,
+    visualization_dir: Path,
+    dpi: int,
+) -> None:
+    """Aggregate all evaluated slices into one visualization per study."""
+
+    if "mask_path" not in predictions.columns:
+        raise ValueError("Metadata must contain mask_path for XAI visualization.")
+
+    parsed = predictions["filename"].map(parse_sample_identifiers)
+    predictions = predictions.copy()
+    predictions["xai_study"] = parsed.map(lambda values: values[0])
+    predictions["xai_nodule"] = parsed.map(lambda values: values[1])
+    predictions["xai_slice_index"] = parsed.map(lambda values: values[2])
+    predictions["xai_nodule_order"] = predictions["xai_nodule"].map(
+        lambda value: int(str(value).rsplit("_", 1)[1])
+    )
+    predictions = predictions.sort_values(
+        ["xai_study", "xai_nodule_order", "xai_slice_index"]
+    )
+
+    study_groups = list(predictions.groupby("xai_study", sort=False))
+    for study_id, study_frame in tqdm(
+        study_groups,
+        desc="Rendering study visualizations",
+        unit="study",
+    ):
+        save_study_figure(
+            study_id=str(study_id),
+            study_frame=study_frame,
+            dataset_root=dataset.root_dir,
+            ct_path_column=dataset.ct_path_column,
+            probability_root=dataset.probability_root,
+            gradcam_npy_dir=gradcam_npy_dir,
+            lrp_npy_dir=lrp_npy_dir,
+            save_path=visualization_dir / f"{study_id}.png",
+            dpi=dpi,
+        )
 
 
 def evaluate_and_explain(
@@ -284,17 +648,13 @@ def evaluate_and_explain(
     dpi: int,
 ) -> tuple[pd.DataFrame, dict[str, float], torch.Tensor]:
     dataset = loader.dataset
-    gradcam_dir = output_dir / "gradcam"
     gradcam_npy_dir = output_dir / "gradcam_npy"
-    lrp_dir = output_dir / "lrp"
     lrp_npy_dir = output_dir / "lrp_npy"
-    combined_dir = output_dir / "xai"
+    visualization_dir = output_dir / "visualization"
     artifact_directories = (
-        gradcam_dir,
         gradcam_npy_dir,
-        lrp_dir,
         lrp_npy_dir,
-        combined_dir,
+        visualization_dir,
     )
     for directory in artifact_directories:
         directory.mkdir(parents=True, exist_ok=True)
@@ -344,7 +704,6 @@ def evaluate_and_explain(
             for batch_index in range(inputs.shape[0]):
                 row = dataset.metadata.iloc[sample_index]
                 filename = Path(str(row["filename"])).name
-                stem = Path(filename).stem
                 prediction = int(predictions[batch_index])
                 probability_values = probabilities[batch_index].cpu()
                 gradcam = gradcam_maps[batch_index].numpy().astype(np.float32)
@@ -352,34 +711,6 @@ def evaluate_and_explain(
                 np.save(gradcam_npy_dir / filename, gradcam, allow_pickle=False)
                 np.save(lrp_npy_dir / filename, lrp, allow_pickle=False)
 
-                ct = np.load(dataset.get_ct_path(sample_index), allow_pickle=False)
-                segmentation_probability = np.load(
-                    dataset.get_probability_path(sample_index), allow_pickle=False
-                )
-                title = (
-                    f"{stem} | True: {row['label']} | "
-                    f"Pred: {dataset.classes[prediction]} "
-                    f"({float(probability_values[prediction]):.3f})"
-                )
-                save_xai_figure(
-                    ct, segmentation_probability, gradcam, lrp, title,
-                    combined_dir / f"{stem}.png", dpi,
-                )
-                save_single_heatmap(
-                    ct,
-                    gradcam,
-                    "Grad-CAM",
-                    gradcam_dir / f"{stem}.png",
-                    dpi,
-                )
-                save_single_heatmap(
-                    ct,
-                    lrp,
-                    "LRP",
-                    lrp_dir / f"{stem}.png",
-                    dpi,
-                    signed=True,
-                )
                 record = dict(row)
                 record.update(
                     {
@@ -405,37 +736,16 @@ def evaluate_and_explain(
     metrics = compute_classification_metrics(confusion)
     metrics["loss"] = total_loss / len(dataset)
     metrics["auc"] = compute_auc(targets.numpy(), probabilities.numpy())
-    return pd.DataFrame(records), metrics, confusion
-
-
-def save_single_heatmap(
-    ct: np.ndarray,
-    heatmap: np.ndarray,
-    method: str,
-    save_path: Path,
-    dpi: int,
-    signed: bool = False,
-) -> None:
-    figure, axes = plt.subplots(1, 3, figsize=(15, 5))
-    display = normalize_ct(ct)
-    cmap, vmin = ("seismic", -1.0) if signed else ("jet", 0.0)
-    axes[0].imshow(display, cmap="gray", vmin=0.0, vmax=1.0)
-    axes[0].set_title("CT")
-    heatmap_artist = axes[1].imshow(
-        heatmap, cmap=cmap, vmin=vmin, vmax=1.0
+    predictions = pd.DataFrame(records)
+    save_study_visualizations(
+        predictions,
+        dataset,
+        gradcam_npy_dir,
+        lrp_npy_dir,
+        visualization_dir,
+        dpi,
     )
-    axes[1].set_title(f"{method} heatmap")
-    axes[2].imshow(display, cmap="gray", vmin=0.0, vmax=1.0)
-    axes[2].imshow(heatmap, cmap=cmap, alpha=0.48, vmin=vmin, vmax=1.0)
-    axes[2].set_title(f"{method} overlay")
-    figure.colorbar(
-        heatmap_artist, ax=axes[1], fraction=0.046, pad=0.025
-    )
-    for axis in axes:
-        axis.axis("off")
-    figure.tight_layout()
-    figure.savefig(save_path, dpi=dpi, bbox_inches="tight")
-    plt.close(figure)
+    return predictions, metrics, confusion
 
 
 def main() -> None:
@@ -447,11 +757,16 @@ def main() -> None:
     result_dir = resolve_path(args.result_dir)
     output_dir = result_dir / "test"
     config = load_fold_config(result_dir)
+    config = relocate_colab_data_paths(config, result_dir)
     device = select_device(args.device)
     loader = build_test_loader(
         config, args.batch_size, args.num_workers, args.max_samples
     )
     models = load_models(result_dir, config, device)
+
+    print(f"Classification run : {result_dir}")
+    print(f"Dataset root       : {config['data']['dataset_root']}")
+    print(f"Probability maps   : {config['data']['probability_root']}")
 
     started = time.perf_counter()
     predictions, metrics, confusion = evaluate_and_explain(
@@ -488,6 +803,15 @@ def main() -> None:
             "gradcam_target": "backbone.layer4[-1]",
             "lrp_rule": "EpsilonPlusFlat with ResNetCanonizer",
             "lrp_target": "CT channels conditioned on the U-Net probability map",
+            "visualization_grouping": "one PNG per study with one section per nodule",
+            "visualization_directory": str(output_dir / "visualization"),
+            "panels": [
+                "full CT scan",
+                "ground-truth nodule mask",
+                "U-Net probability heatmap",
+                "Grad-CAM overlay",
+                "LRP overlay",
+            ],
         },
     }
     with (output_dir / "test_results.json").open("w", encoding="utf-8") as file:

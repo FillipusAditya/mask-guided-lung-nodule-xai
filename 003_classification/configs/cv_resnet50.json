@@ -1,0 +1,77 @@
+{
+    "experiment": {
+        "id": "dc730a13-5813-4d87-b15c-3b630deb32b5",
+        "component": "classification/cv_resnet50"
+    },
+    "output": {
+        "root_directory": "experiment_results",
+        "config_snapshot_filename": "cv_resnet50.json"
+    },
+    "data": {
+        "dataset_root": "000_dataset/_segmentation_dataset_v2",
+        "metadata_path": "000_dataset/_segmentation_dataset_v2/004_classification_cv_5fold_seed42.csv",
+        "ct_path_column": "ct_windowed_path",
+        "input_height": 224,
+        "input_width": 224,
+        "class_to_idx": {
+            "benign": 0,
+            "malignant": 1
+        },
+        "normalization_mean": [0.485, 0.456, 0.406],
+        "normalization_std": [0.229, 0.224, 0.225]
+    },
+    "cross_validation": {
+        "num_folds": 5,
+        "development_role": "development",
+        "holdout_role": "holdout_test",
+        "holdout_fold": -1,
+        "group_column": "cv_group_id",
+        "nodule_column": "cv_nodule_id",
+        "fold_column": "cv_fold",
+        "role_column": "cv_role"
+    },
+    "model": {
+        "architecture": "ResNet50",
+        "pretrained_weights": "DEFAULT",
+        "training_strategy": "full_fine_tuning",
+        "trainable_component": "entire_model",
+        "classifier_dropout": 0.3
+    },
+    "training": {
+        "num_epochs": 100,
+        "batch_size": 32,
+        "learning_rate": 0.001,
+        "seed": 42,
+        "transform_seed": 42,
+        "classification_threshold": 0.5,
+        "device": "auto"
+    },
+    "optimizer": {
+        "name": "SGD",
+        "momentum": 0.9,
+        "weight_decay": 0.0001,
+        "nesterov": false
+    },
+    "dataloader": {
+        "num_workers": 0,
+        "persistent_workers": false,
+        "prefetch_factor": 2,
+        "pin_memory": true,
+        "train_shuffle": true,
+        "val_shuffle": false,
+        "train_drop_last": false,
+        "val_drop_last": false
+    },
+    "early_stopping": {
+        "enabled": true,
+        "monitor": "val_loss",
+        "mode": "min",
+        "patience": 20,
+        "min_delta": 0.0,
+        "verbose": true,
+        "restore_best_weights": true
+    },
+    "checkpoint": {
+        "save_latest": true
+    }
+}
