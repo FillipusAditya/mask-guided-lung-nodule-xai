@@ -26,16 +26,19 @@ evaluasi dan pembuatan prediksi validation.
 
 ## Data
 
-Tersedia dua profil input yang menggunakan pipeline dan hyperparameter yang
+Tersedia tiga profil input yang menggunakan pipeline dan hyperparameter yang
 sama:
 
 | Profil | UUID eksperimen | Kolom CT |
 |---|---|---|
 | `windowed` | `dc730a13-5813-4d87-b15c-3b630deb32b5` | `ct_windowed_path` |
 | `parenchyma` | `242d4058-fee2-47cb-b1f2-6608348300f5` | `ct_parenchyma_path` |
+| `windowed_v2_0877` | `0877cfde-8744-4aaf-909b-7f906a240117` | `ct_windowed_path` |
 
-Keduanya membaca metadata
-`000_dataset/_segmentation_dataset_v2/004_classification_cv_5fold_seed42.csv`.
+Profil `windowed` dan `parenchyma` membaca metadata
+`000_dataset/_segmentation_dataset_v2/004_classification_cv_5fold_seed42.csv`,
+sedangkan `windowed_v2_0877` membaca
+`000_dataset_v2/_segmentation_dataset/004_classification_cv_5fold_seed42.csv`.
 Probability map harus berasal dari UUID eksperimen yang sama dan berada di
 `experiment_results/<experiment_id>/segmentation/unet/inference/probability_npy`.
 Ground-truth mask juga divalidasi sebelum training agar data untuk evaluasi dan
@@ -54,7 +57,8 @@ Konfigurasi profil eksplisit berada di:
 ```text
 003_classification/configs/
 ├── segmentation_guided_cv_resnet50_windowed.json
-└── segmentation_guided_cv_resnet50_parenchyma.json
+├── segmentation_guided_cv_resnet50_parenchyma.json
+└── segmentation_guided_cv_resnet50_windowed_v2_0877.json
 ```
 
 Setiap file mengikat UUID, `ct_input_type`, `ct_path_column`, dan probability
@@ -90,6 +94,14 @@ Jalankan profil lung parenchyma:
 conda run -n deep_learning python \
   -m 003_classification.segmentation_guided_cv_resnet50.train \
   --config 003_classification/configs/segmentation_guided_cv_resnet50_parenchyma.json
+```
+
+Jalankan profil windowed dengan layout dataset LIDC/LNDb terpisah:
+
+```bash
+conda run -n deep_learning python \
+  -m 003_classification.segmentation_guided_cv_resnet50.train \
+  --config 003_classification/configs/segmentation_guided_cv_resnet50_windowed_v2_0877.json
 ```
 
 Hasil U-Net dan guided classification selalu disatukan di bawah UUID yang
