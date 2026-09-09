@@ -26,11 +26,20 @@ evaluasi dan pembuatan prediksi validation.
 
 ## Data
 
-Konfigurasi default membaca:
+Tersedia dua profil input yang menggunakan pipeline dan hyperparameter yang
+sama:
 
-- metadata: `000_dataset/_segmentation_dataset_v2/004_classification_cv_5fold_seed42.csv`
-- CT: kolom `ct_windowed_path`
-- probability map: `experiment_results/<experiment_id>/segmentation/unet/inference/probability_npy`
+| Profil | UUID eksperimen | Kolom CT |
+|---|---|---|
+| `windowed` | `dc730a13-5813-4d87-b15c-3b630deb32b5` | `ct_windowed_path` |
+| `parenchyma` | `242d4058-fee2-47cb-b1f2-6608348300f5` | `ct_parenchyma_path` |
+
+Keduanya membaca metadata
+`000_dataset/_segmentation_dataset_v2/004_classification_cv_5fold_seed42.csv`.
+Probability map harus berasal dari UUID eksperimen yang sama dan berada di
+`experiment_results/<experiment_id>/segmentation/unet/inference/probability_npy`.
+Ground-truth mask juga divalidasi sebelum training agar data untuk evaluasi dan
+visualisasi tersedia sejak awal.
 
 Nama setiap probability `.npy` harus sama dengan kolom `filename`. Dataset
 memvalidasi keberadaan semua pasangan, dimensi array, nilai finite, dan rentang
@@ -40,18 +49,25 @@ oleh transform berpasangan sebelum augmentasi geometris berikutnya.
 
 ## Konfigurasi
 
-Seluruh pengaturan eksperimen utama berada di
-`003_classification/configs/segmentation_guided_cv_resnet50.json`, meliputi
-UUID eksperimen, layout output, sumber data dan probability map, skema CV,
-arsitektur attention, hyperparameter training, optimizer, DataLoader, early
-stopping, serta checkpoint. Path relatif selalu di-resolve dari root
-repository.
+Konfigurasi profil eksplisit berada di:
+
+```text
+003_classification/configs/
+├── segmentation_guided_cv_resnet50_windowed.json
+└── segmentation_guided_cv_resnet50_parenchyma.json
+```
+
+Setiap file mengikat UUID, `ct_input_type`, `ct_path_column`, dan probability
+map yang sesuai. `train.py` memvalidasi bahwa `windowed` selalu menggunakan
+`ct_windowed_path`, sedangkan `parenchyma` selalu menggunakan
+`ct_parenchyma_path`. Konfigurasi lama tanpa `ct_input_type` tetap didukung
+dengan menurunkan tipe input dari nama kolom CT.
 
 Saat training dimulai, file JSON yang efektif disalin ke:
 
 ```text
 experiment_results/<experiment_id>/classification/guided_resnet50/
-└── segmentation_guided_cv_resnet50.json
+    └── segmentation_guided_cv_resnet50.json
 ```
 
 File ini adalah snapshot input konfigurasi. `cv_config.json` dan
@@ -60,14 +76,24 @@ lebih terperinci, termasuk distribusi data, path output, dan UUID run internal.
 
 ## Menjalankan
 
-Jalankan dari root repository pada environment `deep_learning`:
+Jalankan profil full-area windowed dari root repository:
 
 ```bash
-conda run -n deep_learning python -m 003_classification.segmentation_guided_cv_resnet50.train
+conda run -n deep_learning python \
+  -m 003_classification.segmentation_guided_cv_resnet50.train \
+  --config 003_classification/configs/segmentation_guided_cv_resnet50_windowed.json
 ```
 
-Konfigurasi default saat ini menyatukan hasil U-Net dan guided classification
-di bawah UUID `dc730a13-5813-4d87-b15c-3b630deb32b5`:
+Jalankan profil lung parenchyma:
+
+```bash
+conda run -n deep_learning python \
+  -m 003_classification.segmentation_guided_cv_resnet50.train \
+  --config 003_classification/configs/segmentation_guided_cv_resnet50_parenchyma.json
+```
+
+Hasil U-Net dan guided classification selalu disatukan di bawah UUID yang
+tercatat dalam konfigurasi:
 
 ```text
 experiment_results/dc730a13-5813-4d87-b15c-3b630deb32b5/
@@ -75,20 +101,34 @@ experiment_results/dc730a13-5813-4d87-b15c-3b630deb32b5/
 └── classification/guided_resnet50/
 ```
 
-Gunakan UUID baru di JSON jika hendak memulai eksperimen baru. Training tidak
-akan menimpa direktori guided classification yang sudah ada.
+Gunakan UUID baru di file profil jika hendak memulai eksperimen baru. Training
+tidak akan menimpa direktori guided classification yang sudah ada. File JSON
+yang dipilih melalui `--config` disalin sebagai snapshot efektif; nilai input
+yang sama juga dicatat di `cv_config.json` dan setiap
+`fold_<n>/training_config.json`.
 
 Setelah kelima fold selesai, gunakan komponen guided classification pada
 experiment UUID yang sama:
 
 ```bash
 conda run -n deep_learning python -m pip install -r 003_classification/segmentation_guided_cv_resnet50/requirements.txt
-conda run -n deep_learning python -m 003_classification.segmentation_guided_cv_resnet50.test
+
+# Windowed run
+conda run -n deep_learning python \
+  -m 003_classification.segmentation_guided_cv_resnet50.test \
+  experiment_results/dc730a13-5813-4d87-b15c-3b630deb32b5/classification/guided_resnet50
+
+# Parenchyma run
+conda run -n deep_learning python \
+  -m 003_classification.segmentation_guided_cv_resnet50.test \
+  experiment_results/242d4058-fee2-47cb-b1f2-6608348300f5/classification/guided_resnet50
 ```
 
 Tanpa argumen, `test.py` menggunakan hasil Colab yang ditempatkan di
 `experiment_results/dc730a13-5813-4d87-b15c-3b630deb32b5/classification/guided_resnet50`.
-Direktori hasil CV lain masih dapat diberikan sebagai argumen positional.
+`test.py` membaca tipe CT dari snapshot run sehingga pilihan input tidak perlu
+diberikan kembali saat testing. Direktori hasil CV lain masih dapat diberikan
+sebagai argumen positional.
 Path absolut `/content/...` yang tersimpan di konfigurasi Colab otomatis
 dipetakan ke dataset dan probability map lokal tanpa mengubah provenance
 konfigurasi asli.
@@ -112,7 +152,7 @@ test/
 └── roc_curve.png
 ```
 
-Setiap baris slice pada section nodule menampilkan full windowed CT,
+Setiap baris slice pada section nodule menampilkan CT sesuai profil training,
 ground-truth nodule mask, probability heatmap U-Net, Grad-CAM overlay, dan LRP
 overlay. Grad-CAM dan LRP di-resize ke grid CT asli hanya untuk visualisasi;
 array `.npy` tetap disimpan pada resolusi input model.

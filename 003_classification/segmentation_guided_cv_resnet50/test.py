@@ -44,6 +44,10 @@ CONFIG_PATH = (
     / "segmentation_guided_cv_resnet50.json"
 )
 DEFAULT_DATASET_ROOT = PROJECT_ROOT / "000_dataset/_segmentation_dataset_v2"
+CT_INPUT_COLUMNS = {
+    "windowed": "ct_windowed_path",
+    "parenchyma": "ct_parenchyma_path",
+}
 SAMPLE_FILENAME_PATTERN = re.compile(
     r"^(?P<study>.+)_(?P<nodule_kind>finding|cluster)_"
     r"(?P<nodule_number>\d+)_slice_(?P<slice_index>\d+)\.npy$"
@@ -82,8 +86,21 @@ def parse_args() -> argparse.Namespace:
             "component selected in the JSON configuration."
         ),
     )
-    parser.add_argument("--batch-size", type=int, default=4)
-    parser.add_argument("--num-workers", type=int, default=4)
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=1,
+        help="Inference batch size. The default is conservative for local GPUs.",
+    )
+    parser.add_argument(
+        "--num-workers",
+        type=int,
+        default=0,
+        help=(
+            "DataLoader worker count. Zero is the safest default for local and "
+            "notebook execution."
+        ),
+    )
     parser.add_argument("--device", choices=("auto", "cpu", "cuda"), default="auto")
     parser.add_argument("--max-samples", type=int, default=None)
     parser.add_argument("--dpi", type=int, default=120)
@@ -97,18 +114,143 @@ def select_device(requested: str) -> torch.device:
     return torch.device(requested)
 
 
-def load_fold_config(result_dir: Path) -> dict[str, Any]:
+def load_json(path: Path) -> dict[str, Any]:
+    """Load one JSON object with a clear error for invalid top-level data."""
+
+    with path.open("r", encoding="utf-8") as file:
+        values = json.load(file)
+    if not isinstance(values, dict):
+        raise ValueError(f"Expected a JSON object: {path}")
+    return values
+
+
+def validate_run_config(
+    fold_config: dict[str, Any],
+    run_config: dict[str, Any],
+    path: Path,
+) -> None:
+    """Reject a run-level config that does not belong to these checkpoints."""
+
+    architecture = run_config.get("model", {}).get("architecture")
+    if architecture != SegmentationGuidedResNet50.architecture_name:
+        raise ValueError(
+            f"Unexpected model architecture in {path}: {architecture!r}."
+        )
+
+    fold_experiment = fold_config.get("experiment", {})
+    run_experiment = run_config.get("experiment", {})
+    fold_experiment_id = fold_experiment.get("experiment_id")
+    run_experiment_id = run_experiment.get(
+        "experiment_id", run_experiment.get("id")
+    )
+    if (
+        fold_experiment_id is not None
+        and run_experiment_id is not None
+        and str(fold_experiment_id) != str(run_experiment_id)
+    ):
+        raise ValueError(
+            "Experiment ID mismatch between fold configuration and "
+            f"{path}: {fold_experiment_id!r} != {run_experiment_id!r}."
+        )
+
+
+def normalize_ct_input_config(data: dict[str, Any]) -> dict[str, Any]:
+    """Validate new profiles and infer input types for historical runs."""
+
+    data = dict(data)
+    ct_path_column = str(data["ct_path_column"])
+    ct_input_type = data.get("ct_input_type")
+    if ct_input_type is None:
+        matching_input_types = [
+            input_type
+            for input_type, column in CT_INPUT_COLUMNS.items()
+            if column == ct_path_column
+        ]
+        if not matching_input_types:
+            raise ValueError(
+                "Cannot infer ct_input_type from ct_path_column="
+                f"{ct_path_column!r}."
+            )
+        ct_input_type = matching_input_types[0]
+    else:
+        ct_input_type = str(ct_input_type).strip().lower()
+    if ct_input_type not in CT_INPUT_COLUMNS:
+        raise ValueError(
+            f"ct_input_type must be one of {sorted(CT_INPUT_COLUMNS)}, "
+            f"received {ct_input_type!r}."
+        )
+    expected_column = CT_INPUT_COLUMNS[ct_input_type]
+    if ct_path_column != expected_column:
+        raise ValueError(
+            f"ct_input_type={ct_input_type!r} requires "
+            f"ct_path_column={expected_column!r}, received "
+            f"{ct_path_column!r}."
+        )
+    data["ct_input_type"] = ct_input_type
+    data["ct_path_column"] = ct_path_column
+    return data
+
+
+def load_run_config(result_dir: Path) -> tuple[dict[str, Any], list[Path]]:
+    """Combine fold details with authoritative run-level data settings.
+
+    Historical Colab runs can contain stale path fields in each fold's copied
+    training configuration. The root snapshot and ``cv_config.json`` describe
+    the data that was actually selected for the complete run, while the fold
+    configuration remains authoritative for model and transform details.
+    """
+
     path = result_dir / "fold_0" / "training_config.json"
     if not path.is_file():
         raise FileNotFoundError(f"Fold training configuration not found: {path}")
-    with path.open("r", encoding="utf-8") as file:
-        config = json.load(file)
+    config = load_json(path)
     if (
         config.get("model", {}).get("architecture")
         != SegmentationGuidedResNet50.architecture_name
     ):
         raise ValueError("The result directory is not a segmentation-guided ResNet-50 run.")
-    return config
+
+    data = dict(config["data"])
+    sources = [path]
+
+    snapshot_path = result_dir / "segmentation_guided_cv_resnet50.json"
+    if snapshot_path.is_file():
+        snapshot = load_json(snapshot_path)
+        validate_run_config(config, snapshot, snapshot_path)
+        snapshot_data = snapshot.get("data", {})
+        for key in (
+            "dataset_root",
+            "metadata_path",
+            "probability_root",
+            "ct_input_type",
+            "ct_path_column",
+        ):
+            if key in snapshot_data:
+                data[key] = snapshot_data[key]
+        sources.append(snapshot_path)
+
+    cv_config_path = result_dir / "cv_config.json"
+    if cv_config_path.is_file():
+        cv_config = load_json(cv_config_path)
+        validate_run_config(config, cv_config, cv_config_path)
+        cv_data = cv_config.get("data", {})
+        for key in (
+            "dataset_root",
+            "probability_root",
+            "ct_input_type",
+            "ct_path_column",
+        ):
+            if key in cv_data:
+                data[key] = cv_data[key]
+        cv_metadata_path = cv_config.get("cross_validation", {}).get(
+            "metadata_path"
+        )
+        if cv_metadata_path:
+            data["metadata_path"] = cv_metadata_path
+        sources.append(cv_config_path)
+
+    config["data"] = normalize_ct_input_config(data)
+    return config, sources
 
 
 def relocate_colab_data_paths(
@@ -213,6 +355,18 @@ def build_test_loader(
             raise ValueError("--max-samples must be positive.")
         dataset.metadata = dataset.metadata.iloc[:max_samples].reset_index(drop=True)
         dataset.targets = dataset.targets[:max_samples]
+
+    missing_ct = [
+        dataset.get_ct_path(index)
+        for index in range(len(dataset))
+        if not dataset.get_ct_path(index).is_file()
+    ]
+    if missing_ct:
+        preview = ", ".join(str(path) for path in missing_ct[:5])
+        raise FileNotFoundError(
+            f"Missing {len(missing_ct)} CT files selected through "
+            f"{data['ct_path_column']!r}; examples: {preview}"
+        )
     return DataLoader(
         dataset,
         batch_size=batch_size,
@@ -287,7 +441,11 @@ class GradCAM:
         weights = self.gradients.mean(dim=(2, 3), keepdim=True)
         maps = torch.relu((weights * self.activations).sum(dim=1, keepdim=True))
         maps = F.interpolate(maps, inputs.shape[-2:], mode="bilinear", align_corners=False)
-        return normalize_unsigned(maps[:, 0]).detach()
+        result = normalize_unsigned(maps[:, 0]).detach()
+        self.activations = None
+        self.gradients = None
+        self.model.zero_grad(set_to_none=True)
+        return result
 
     def close(self) -> None:
         self.handle.remove()
@@ -417,6 +575,7 @@ def save_study_figure(
     study_frame: pd.DataFrame,
     dataset_root: Path,
     ct_path_column: str,
+    ct_panel_title: str,
     probability_root: Path,
     gradcam_npy_dir: Path,
     lrp_npy_dir: Path,
@@ -441,7 +600,7 @@ def save_study_figure(
         height_ratios=section_heights,
     )
     column_titles = (
-        "Full CT scan",
+        ct_panel_title,
         "Ground-truth nodule mask",
         "U-Net probability heatmap",
         "Grad-CAM overlay",
@@ -622,6 +781,10 @@ def save_study_visualizations(
     )
 
     study_groups = list(predictions.groupby("xai_study", sort=False))
+    ct_panel_title = {
+        "ct_windowed_path": "Full-area windowed CT",
+        "ct_parenchyma_path": "Lung-parenchyma CT",
+    }.get(dataset.ct_path_column, "CT scan")
     for study_id, study_frame in tqdm(
         study_groups,
         desc="Rendering study visualizations",
@@ -632,6 +795,7 @@ def save_study_visualizations(
             study_frame=study_frame,
             dataset_root=dataset.root_dir,
             ct_path_column=dataset.ct_path_column,
+            ct_panel_title=ct_panel_title,
             probability_root=dataset.probability_root,
             gradcam_npy_dir=gradcam_npy_dir,
             lrp_npy_dir=lrp_npy_dir,
@@ -756,7 +920,7 @@ def main() -> None:
         )
     result_dir = resolve_path(args.result_dir)
     output_dir = result_dir / "test"
-    config = load_fold_config(result_dir)
+    config, config_sources = load_run_config(result_dir)
     config = relocate_colab_data_paths(config, result_dir)
     device = select_device(args.device)
     loader = build_test_loader(
@@ -765,7 +929,13 @@ def main() -> None:
     models = load_models(result_dir, config, device)
 
     print(f"Classification run : {result_dir}")
+    print(
+        "Configuration      : "
+        + ", ".join(str(path.relative_to(result_dir)) for path in config_sources)
+    )
     print(f"Dataset root       : {config['data']['dataset_root']}")
+    print(f"CT input type      : {config['data']['ct_input_type']}")
+    print(f"CT path column     : {config['data']['ct_path_column']}")
     print(f"Probability maps   : {config['data']['probability_root']}")
 
     started = time.perf_counter()
@@ -789,6 +959,8 @@ def main() -> None:
     results = {
         "evaluated_at": datetime.now().isoformat(timespec="seconds"),
         "architecture": SegmentationGuidedResNet50.architecture_name,
+        "ct_input_type": config["data"]["ct_input_type"],
+        "ct_path_column": config["data"]["ct_path_column"],
         "ensemble_folds": len(models),
         "samples": len(loader.dataset),
         "metrics": {
@@ -806,7 +978,11 @@ def main() -> None:
             "visualization_grouping": "one PNG per study with one section per nodule",
             "visualization_directory": str(output_dir / "visualization"),
             "panels": [
-                "full CT scan",
+                (
+                    "full-area windowed CT"
+                    if config["data"]["ct_input_type"] == "windowed"
+                    else "lung-parenchyma CT"
+                ),
                 "ground-truth nodule mask",
                 "U-Net probability heatmap",
                 "Grad-CAM overlay",

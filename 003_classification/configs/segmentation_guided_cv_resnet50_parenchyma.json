@@ -1,6 +1,6 @@
 {
     "experiment": {
-        "id": "dc730a13-5813-4d87-b15c-3b630deb32b5",
+        "id": "242d4058-fee2-47cb-b1f2-6608348300f5",
         "component": "classification/guided_resnet50"
     },
     "output": {
@@ -10,9 +10,9 @@
     "data": {
         "dataset_root": "000_dataset/_segmentation_dataset_v2",
         "metadata_path": "000_dataset/_segmentation_dataset_v2/004_classification_cv_5fold_seed42.csv",
-        "ct_input_type": "windowed",
-        "ct_path_column": "ct_windowed_path",
-        "probability_root": "experiment_results/dc730a13-5813-4d87-b15c-3b630deb32b5/segmentation/unet/inference/probability_npy",
+        "ct_input_type": "parenchyma",
+        "ct_path_column": "ct_parenchyma_path",
+        "probability_root": "experiment_results/242d4058-fee2-47cb-b1f2-6608348300f5/segmentation/unet/inference/probability_npy",
         "input_height": 224,
         "input_width": 224,
         "class_to_idx": {

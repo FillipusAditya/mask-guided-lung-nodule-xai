@@ -1,5 +1,6 @@
 """Run five-fold full tuning of probability-guided ResNet-50."""
 
+import argparse
 from collections import Counter
 from datetime import datetime
 import json
@@ -40,9 +41,52 @@ from .transforms import build_train_transform, build_val_transform
 # ---------------------------------------------------------------------------
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 CLASSIFICATION_ROOT = Path(__file__).resolve().parents[1]
-CONFIG_PATH = (
+DEFAULT_CONFIG_PATH = (
     CLASSIFICATION_ROOT / "configs" / "segmentation_guided_cv_resnet50.json"
 )
+CT_INPUT_COLUMNS = {
+    "windowed": "ct_windowed_path",
+    "parenchyma": "ct_parenchyma_path",
+}
+
+
+def resolve_config_path(value: str | Path) -> Path:
+    """Resolve a CLI configuration path from the repository root."""
+
+    path = Path(value).expanduser()
+    return path.resolve() if path.is_absolute() else (PROJECT_ROOT / path).resolve()
+
+
+def _selected_config_path() -> Path:
+    """Read --config before module-level settings are initialized."""
+
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG_PATH)
+    arguments, _ = parser.parse_known_args()
+    return resolve_config_path(arguments.config)
+
+
+def parse_args() -> argparse.Namespace:
+    """Parse the training configuration selected by the caller."""
+
+    parser = argparse.ArgumentParser(
+        description="Train a segmentation-guided ResNet-50 with five-fold CV."
+    )
+    parser.add_argument(
+        "--config",
+        type=Path,
+        default=DEFAULT_CONFIG_PATH,
+        help=(
+            "JSON configuration path, resolved from the repository root when "
+            "relative."
+        ),
+    )
+    return parser.parse_args()
+
+
+CONFIG_PATH = _selected_config_path()
+if not CONFIG_PATH.is_file():
+    raise FileNotFoundError(f"Training configuration not found: {CONFIG_PATH}")
 
 with CONFIG_PATH.open("r", encoding="utf-8") as file:
     CONFIG = json.load(file)
@@ -96,7 +140,39 @@ CV_FIGURES_DIR = OUTPUT_DIR / "figures"
 DATASET_ROOT = resolve_project_path(DATA_CONFIG["dataset_root"])
 METADATA_PATH = resolve_project_path(DATA_CONFIG["metadata_path"])
 CT_PATH_COLUMN = str(DATA_CONFIG["ct_path_column"])
+configured_ct_input_type = DATA_CONFIG.get("ct_input_type")
+if configured_ct_input_type is None:
+    matching_input_types = [
+        input_type
+        for input_type, column in CT_INPUT_COLUMNS.items()
+        if column == CT_PATH_COLUMN
+    ]
+    if not matching_input_types:
+        raise ValueError(
+            "Cannot infer data.ct_input_type from data.ct_path_column="
+            f"{CT_PATH_COLUMN!r}."
+        )
+    CT_INPUT_TYPE = matching_input_types[0]
+else:
+    CT_INPUT_TYPE = str(configured_ct_input_type).strip().lower()
+if CT_INPUT_TYPE not in CT_INPUT_COLUMNS:
+    raise ValueError(
+        f"data.ct_input_type must be one of {sorted(CT_INPUT_COLUMNS)}, "
+        f"received {CT_INPUT_TYPE!r}."
+    )
+expected_ct_path_column = CT_INPUT_COLUMNS[CT_INPUT_TYPE]
+if CT_PATH_COLUMN != expected_ct_path_column:
+    raise ValueError(
+        f"data.ct_input_type={CT_INPUT_TYPE!r} requires "
+        f"data.ct_path_column={expected_ct_path_column!r}, received "
+        f"{CT_PATH_COLUMN!r}."
+    )
 PROBABILITY_ROOT = resolve_project_path(DATA_CONFIG["probability_root"])
+if EXPERIMENT_ID not in PROBABILITY_ROOT.parts:
+    raise ValueError(
+        "data.probability_root must belong to the configured experiment ID "
+        f"{EXPERIMENT_ID!r}: {PROBABILITY_ROOT}"
+    )
 INPUT_HEIGHT = int(DATA_CONFIG["input_height"])
 INPUT_WIDTH = int(DATA_CONFIG["input_width"])
 CLASS_TO_IDX = {
@@ -199,6 +275,7 @@ REQUIRED_CV_COLUMNS = {
     NODULE_COLUMN,
     ROLE_COLUMN,
     FOLD_COLUMN,
+    "mask_path",
 }
 
 SUMMARY_METRICS = (
@@ -215,8 +292,14 @@ SUMMARY_METRICS = (
 def validate_cv_metadata() -> pd.DataFrame:
     """Load and validate patient and nodule isolation in the CV metadata."""
 
+    if not DATASET_ROOT.is_dir():
+        raise FileNotFoundError(f"Dataset root not found: {DATASET_ROOT}")
     if not METADATA_PATH.is_file():
         raise FileNotFoundError(f"CV metadata not found: {METADATA_PATH}")
+    if not PROBABILITY_ROOT.is_dir():
+        raise FileNotFoundError(
+            f"U-Net probability-map directory not found: {PROBABILITY_ROOT}"
+        )
 
     metadata = pd.read_csv(METADATA_PATH)
     if metadata.empty:
@@ -284,6 +367,34 @@ def validate_cv_metadata() -> pd.DataFrame:
             raise ValueError(f"Fold {fold} does not contain every class.")
         if fold_datasets != expected_datasets:
             raise ValueError(f"Fold {fold} does not contain every dataset.")
+
+    missing_ct = [
+        DATASET_ROOT / str(value)
+        for value in metadata[CT_PATH_COLUMN]
+        if not (DATASET_ROOT / str(value)).is_file()
+    ]
+    missing_probability = [
+        PROBABILITY_ROOT / Path(str(filename)).name
+        for filename in metadata["filename"]
+        if not (PROBABILITY_ROOT / Path(str(filename)).name).is_file()
+    ]
+    missing_masks = [
+        DATASET_ROOT / str(value)
+        for value in metadata["mask_path"]
+        if not (DATASET_ROOT / str(value)).is_file()
+    ]
+    if missing_ct or missing_probability or missing_masks:
+        previews = []
+        for name, paths in (
+            ("CT", missing_ct),
+            ("probability map", missing_probability),
+            ("ground-truth mask", missing_masks),
+        ):
+            if paths:
+                previews.append(
+                    f"{name}={len(paths)} (example: {paths[0]})"
+                )
+        raise FileNotFoundError("Missing training data: " + "; ".join(previews))
 
     return metadata
 
@@ -469,7 +580,10 @@ def build_fold_config(
     )
     config["data"].update(
         {
+            "dataset_root": str(DATASET_ROOT),
             "metadata_path": str(METADATA_PATH),
+            "ct_input_type": CT_INPUT_TYPE,
+            "ct_path_column": CT_PATH_COLUMN,
             "probability_root": str(PROBABILITY_ROOT),
             "probability_input_channels": 1,
             "input_channels": 4,
@@ -587,6 +701,7 @@ def build_cv_config(metadata: pd.DataFrame) -> dict[str, object]:
         "data": {
             "dataset_root": str(DATASET_ROOT),
             "probability_root": str(PROBABILITY_ROOT),
+            "ct_input_type": CT_INPUT_TYPE,
             "ct_path_column": CT_PATH_COLUMN,
             "input_size": [INPUT_HEIGHT, INPUT_WIDTH, 4],
             "class_to_idx": CLASS_TO_IDX,
@@ -1046,6 +1161,13 @@ def validate_oof_predictions(
 def main() -> None:
     """Run five independent full-fine-tuning cross-validation folds."""
 
+    arguments = parse_args()
+    requested_config_path = resolve_config_path(arguments.config)
+    if requested_config_path != CONFIG_PATH:
+        raise RuntimeError(
+            "The parsed configuration changed after module initialization: "
+            f"{CONFIG_PATH} != {requested_config_path}."
+        )
     metadata = validate_cv_metadata()
     OUTPUT_DIR.mkdir(parents=True, exist_ok=False)
     shutil.copy2(CONFIG_PATH, CONFIG_SNAPSHOT_PATH)
@@ -1053,7 +1175,12 @@ def main() -> None:
     save_training_config(build_cv_config(metadata), CV_CONFIG_PATH)
 
     print("Segmentation-Guided ResNet-50 — Stratified Group 5-Fold CV")
+    print(f"Configuration       : {CONFIG_PATH}")
+    print(f"Experiment ID       : {EXPERIMENT_ID}")
     print(f"Metadata            : {METADATA_PATH}")
+    print(f"CT input type       : {CT_INPUT_TYPE}")
+    print(f"CT path column      : {CT_PATH_COLUMN}")
+    print(f"Probability maps    : {PROBABILITY_ROOT}")
     print(
         f"Development samples : "
         f"{metadata[ROLE_COLUMN].eq(DEVELOPMENT_ROLE).sum()}"
