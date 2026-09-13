@@ -64,6 +64,51 @@ class DiceLoss(nn.Module):
         return 1.0 - dice_score.mean()
 
 
+class BCEDiceLoss(nn.Module):
+    """
+    Compute combined BCE and Dice loss for binary image segmentation.
+    """
+
+    def __init__(self, smooth: float = 1e-6) -> None:
+        """
+        Initialize the combined BCE and Dice loss.
+
+        Parameters
+        ----------
+        smooth : float, default=1e-6
+            Small constant added to avoid division by zero in Dice loss.
+        """
+
+        super().__init__()
+
+        self.bce_loss = nn.BCEWithLogitsLoss()
+        self.dice_loss = DiceLoss(smooth=smooth)
+
+    def forward(self, logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+        """
+        Compute the combined BCE and Dice loss.
+
+        Parameters
+        ----------
+        logits : torch.Tensor
+            Raw model predictions.
+        targets : torch.Tensor
+            Ground-truth segmentation masks.
+
+        Returns
+        -------
+        torch.Tensor
+            Combined loss calculated as 0.5 times BCE loss plus Dice loss.
+        """
+
+        # Compute BCE in FP32 for numerical stability with mixed precision.
+        bce_loss = self.bce_loss(logits.float(), targets.float())
+
+        # Combine the weighted BCE loss with the Dice loss.
+        dice_loss = self.dice_loss(logits, targets)
+        return 0.5 * bce_loss + dice_loss
+
+
 class IoULoss(nn.Module):
     """
     Compute Intersection over Union loss for binary image segmentation.

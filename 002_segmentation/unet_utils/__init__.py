@@ -8,7 +8,7 @@ from .logger import (
     create_training_log,
     synchronize_training_log,
 )
-from .loss import DiceLoss, IoULoss
+from .loss import BCEDiceLoss, DiceLoss, IoULoss
 from .metrics import compute_segmentation_metrics, update_confusion_matrix
 from .seed import set_seed
 from .tiles import merge_tiles, split_into_tiles
@@ -25,6 +25,7 @@ __all__ = [
     "append_training_log",
     "synchronize_training_log",
     "DiceLoss",
+    "BCEDiceLoss",
     "IoULoss",
     "update_confusion_matrix",
     "compute_segmentation_metrics",

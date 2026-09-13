@@ -35,8 +35,8 @@ def train_one_epoch(
 
     This function performs one complete pass over the training dataset.
     For each mini-batch, it processes every tile with activation
-    checkpointing, reconstructs the full-size logits, computes one Dice loss
-    per image, performs backpropagation, and updates the model parameters.
+    checkpointing, reconstructs the full-size logits, computes one segmentation
+    loss per image, performs backpropagation, and updates the model parameters.
 
     Parameters
     ----------
@@ -64,7 +64,7 @@ def train_one_epoch(
     Returns
     -------
     float
-        Average full-image Dice loss for the epoch.
+        Average full-image segmentation loss for the epoch.
     """
 
     # Enable training mode
@@ -102,7 +102,7 @@ def train_one_epoch(
 
             prediction_tiles.append(predictions)
 
-        # Reconstruct full-size logits and masks before computing Dice loss.
+        # Reconstruct full-size logits and masks before computing the loss.
         predictions = merge_tiles(
             torch.stack(prediction_tiles, dim=1),
             grid_size=tile_grid_size,
@@ -146,7 +146,7 @@ def validate_one_epoch(
 
     This function performs one complete pass over the validation dataset.
     Model parameters are not updated during validation. Tile logits are
-    reconstructed before calculating the full-image Dice loss and binary
+    reconstructed before calculating the full-image segmentation loss and binary
     segmentation metrics.
 
     Parameters
@@ -174,7 +174,7 @@ def validate_one_epoch(
     dict[str, float]
         Dictionary containing the following validation metrics:
 
-        - ``loss`` : Average full-image validation Dice loss.
+        - ``loss`` : Average full-image validation segmentation loss.
         - ``dice`` : Dice similarity coefficient.
         - ``iou`` : Intersection over Union (Jaccard index).
         - ``precision`` : Positive predictive value.

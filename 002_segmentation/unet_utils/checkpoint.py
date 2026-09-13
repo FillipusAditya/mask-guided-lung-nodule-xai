@@ -13,6 +13,7 @@ def save_checkpoint(
     model: nn.Module,
     optimizer: Optimizer,
     scaler: torch.amp.GradScaler,
+    loss_config: dict[str, object],
     epoch: int,
     best_val_loss: float,
     best_epoch: int,
@@ -30,6 +31,8 @@ def save_checkpoint(
         Training optimizer.
     scaler : torch.amp.GradScaler
         Gradient scaler used for automatic mixed-precision training.
+    loss_config : dict[str, object]
+        Loss function configuration used by the experiment.
     epoch : int
         Number of completed epochs.
     best_val_loss : float
@@ -48,6 +51,7 @@ def save_checkpoint(
         "model_state_dict": model.state_dict(),
         "optimizer_state_dict": optimizer.state_dict(),
         "scaler_state_dict": scaler.state_dict(),
+        "loss_config": dict(loss_config),
         "best_val_loss": best_val_loss,
         "best_epoch": best_epoch,
         "epochs_without_improvement": epochs_without_improvement,
@@ -93,6 +97,7 @@ def load_checkpoint(
     model: nn.Module,
     optimizer: Optimizer,
     scaler: torch.amp.GradScaler,
+    expected_loss_config: dict[str, object],
 ) -> tuple[int, float, int, int]:
     """
     Restore training state and return the saved training progress.
@@ -107,15 +112,39 @@ def load_checkpoint(
         Optimizer whose state will be restored.
     scaler : torch.amp.GradScaler
         Gradient scaler whose state will be restored.
+    expected_loss_config : dict[str, object]
+        Loss configuration required for the resumed experiment.
 
     Returns
     -------
     tuple[int, float, int, int]
         Completed epochs, lowest validation loss, its epoch, and consecutive
         epochs without improvement.
+
+    Raises
+    ------
+    RuntimeError
+        If the checkpoint does not contain a loss configuration.
+    ValueError
+        If the checkpoint loss configuration differs from the current one.
     """
 
     checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
+
+    checkpoint_loss_config = checkpoint.get("loss_config")
+    if checkpoint_loss_config is None:
+        raise RuntimeError(
+            "Checkpoint does not contain a loss configuration and cannot be "
+            "safely resumed. Start a new experiment or use a checkpoint created "
+            "by the current training code."
+        )
+
+    if checkpoint_loss_config != expected_loss_config:
+        raise ValueError(
+            "Loss configuration mismatch when resuming training: "
+            f"checkpoint uses {checkpoint_loss_config!r}, but the current "
+            f"configuration uses {expected_loss_config!r}."
+        )
 
     model.load_state_dict(checkpoint["model_state_dict"])
     optimizer.load_state_dict(checkpoint["optimizer_state_dict"])

@@ -4,6 +4,7 @@ import sys
 from uuid import uuid4
 
 import albumentations as A
+import cv2
 import pandas as pd
 
 import torch
@@ -14,7 +15,9 @@ sys.path.insert(0, str(SEGMENTATION_ROOT))
 
 from unet_arch import UNET
 from unet_utils import (
+    BCEDiceLoss,
     DiceLoss,
+    IoULoss,
     append_training_log,
     create_dataloader,
     create_training_log,
@@ -37,6 +40,7 @@ with CONFIG_PATH.open("r", encoding="utf-8") as file:
 OUTPUT_CONFIG = CONFIG["output"]
 DATA_CONFIG = CONFIG["data"]
 TRAINING_CONFIG = CONFIG["training"]
+LOSS_CONFIG = CONFIG["loss"]
 OPTIMIZER_CONFIG = CONFIG["optimizer"]
 DATALOADER_CONFIG = CONFIG["dataloader"]
 AMP_CONFIG = CONFIG["amp"]
@@ -59,7 +63,13 @@ if RESUME_CHECKPOINT_PATH is not None:
 else:
     RUN_ID = uuid4()
     RESULT_DIR_NAME = str(RUN_ID)
-    OUTPUT_DIR = PROJECT_ROOT / OUTPUT_CONFIG["root_directory"] / RESULT_DIR_NAME
+    OUTPUT_DIR = (
+        PROJECT_ROOT
+        / OUTPUT_CONFIG["root_directory"]
+        / RESULT_DIR_NAME
+        / "segmentation"
+        / "unet"
+    )
 
 TRAINING_LOG_PATH = OUTPUT_DIR / "training_log.csv"
 LAST_CHECKPOINT_PATH = OUTPUT_DIR / "last_checkpoint.pth"
@@ -92,12 +102,114 @@ EARLY_STOPPING_PATIENCE = TRAINING_CONFIG["early_stopping_patience"]
 
 PRED_THRESHOLD = TRAINING_CONFIG["prediction_threshold"]
 
+LOSS_NAME = LOSS_CONFIG["name"]
+LOSS_SMOOTH = LOSS_CONFIG["smooth"]
+
 WEIGHT_DECAY_OPTM = OPTIMIZER_CONFIG["weight_decay"]
 
 # select the runtime device and configure automatic mixed precision
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 TRAIN_AMP_ENABLED = AMP_CONFIG["training_enabled"] and DEVICE == "cuda"
+
+
+def create_loss_function():
+    """
+    Create the configured segmentation loss function.
+
+    Returns
+    -------
+    torch.nn.Module
+        Configured loss function.
+
+    Raises
+    ------
+    ValueError
+        If the configured loss function name is unsupported.
+    """
+
+    loss_functions = {
+        "DiceLoss": DiceLoss,
+        "BCEDiceLoss": BCEDiceLoss,
+        "IoULoss": IoULoss,
+    }
+
+    if LOSS_NAME not in loss_functions:
+        supported_losses = ", ".join(loss_functions)
+
+        raise ValueError(
+            f"Unsupported loss function: {LOSS_NAME!r}. "
+            f"Supported loss functions are: {supported_losses}."
+        )
+
+    loss_class = loss_functions[LOSS_NAME]
+
+    return loss_class(smooth=LOSS_SMOOTH)
+
+
+def generate_training_visualizations() -> None:
+    """
+    Generate metric curves from the current experiment training log.
+    """
+
+    training_log = pd.read_csv(TRAINING_LOG_PATH)
+
+    plot_all_curves(training_log=training_log, output_dir=OUTPUT_DIR)
+
+    print("Training visualizations generated successfully.")
+
+
+def build_train_transform() -> A.Compose:
+    """
+    Build the stochastic image-mask transformations used for training.
+    """
+
+    return A.Compose(
+        [
+            A.Resize(
+                height=INPUT_HEIGHT,
+                width=INPUT_WIDTH,
+                interpolation=cv2.INTER_LINEAR,
+                mask_interpolation=cv2.INTER_NEAREST,
+            ),
+            A.HorizontalFlip(p=0.5),
+            A.Affine(
+                scale=(0.9, 1.1),
+                translate_percent=(-0.05, 0.05),
+                rotate=(-10, 10),
+                interpolation=cv2.INTER_LINEAR,
+                mask_interpolation=cv2.INTER_NEAREST,
+                border_mode=cv2.BORDER_CONSTANT,
+                fill=0.0,
+                fill_mask=0.0,
+                p=1.0,
+            ),
+            A.RandomBrightnessContrast(
+                brightness_limit=0.10,
+                contrast_limit=0.10,
+                p=0.25,
+            ),
+            A.GaussNoise(std_range=(0.01, 0.03), p=0.2),
+        ],
+        seed=SEED,
+    )
+
+
+def build_val_transform() -> A.Compose:
+    """
+    Build the deterministic image-mask transformations used for validation.
+    """
+
+    return A.Compose(
+        [
+            A.Resize(
+                height=INPUT_HEIGHT,
+                width=INPUT_WIDTH,
+                interpolation=cv2.INTER_LINEAR,
+                mask_interpolation=cv2.INTER_NEAREST,
+            )
+        ]
+    )
 
 
 def main() -> None:
@@ -117,15 +229,16 @@ def main() -> None:
     # initialize random number generators for reproducible training
     set_seed(SEED)
 
-    # resize each image-mask pair and convert both arrays to tensors
-    transforms = A.Compose([A.Resize(height=INPUT_HEIGHT, width=INPUT_WIDTH)])
+    # build stochastic training transforms and deterministic validation transforms
+    train_transform = build_train_transform()
+    val_transform = build_val_transform()
 
     # create data loaders for the configured training and validation splits
     train_loader = create_dataloader(
         root_dir=DATASET_ROOT,
         split="train",
         batch_size=BATCH_SIZE,
-        transform=transforms,
+        transform=train_transform,
         split_method=SPLIT_METHOD,
         metadata_filename=METADATA_FILENAME,
         fold=FOLD,
@@ -142,7 +255,7 @@ def main() -> None:
         root_dir=DATASET_ROOT,
         split="val",
         batch_size=BATCH_SIZE,
-        transform=transforms,
+        transform=val_transform,
         split_method=SPLIT_METHOD,
         metadata_filename=METADATA_FILENAME,
         fold=FOLD,
@@ -159,7 +272,9 @@ def main() -> None:
         features=[16, 32, 64, 128],
     ).to(DEVICE)
 
-    loss_fn = DiceLoss()
+    loss_fn = create_loss_function()
+    print(f"Loss function: {LOSS_NAME}")
+    print(f"Loss smooth: {LOSS_SMOOTH}")
 
     optimizer = optim.AdamW(
         model.parameters(), lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY_OPTM
@@ -183,6 +298,7 @@ def main() -> None:
             model=model,
             optimizer=optimizer,
             scaler=scaler,
+            expected_loss_config=LOSS_CONFIG,
         )
 
         # discard log entries that were written after the latest checkpoint
@@ -192,6 +308,7 @@ def main() -> None:
 
     if completed_epochs >= TOTAL_EPOCHS:
         print(f"Training has already completed {TOTAL_EPOCHS} epochs.")
+        generate_training_visualizations()
         return
 
     if epochs_without_improvement >= EARLY_STOPPING_PATIENCE:
@@ -199,6 +316,7 @@ def main() -> None:
             "Early stopping has already been reached after "
             f"{epochs_without_improvement} epochs without improvement."
         )
+        generate_training_visualizations()
         return
 
     # continue training until the configured total number of epochs
@@ -267,6 +385,7 @@ def main() -> None:
             model=model,
             optimizer=optimizer,
             scaler=scaler,
+            loss_config=LOSS_CONFIG,
             epoch=current_epoch,
             best_val_loss=best_val_loss,
             best_epoch=best_epoch,
@@ -281,12 +400,7 @@ def main() -> None:
             )
             break
 
-    # generate metric curves from the completed training log
-    training_log = pd.read_csv(TRAINING_LOG_PATH)
-
-    plot_all_curves(training_log=training_log, output_dir=OUTPUT_DIR)
-
-    print("Training visualizations generated successfully.")
+    generate_training_visualizations()
     print(f"Last checkpoint saved to: {LAST_CHECKPOINT_PATH}")
     print(f"Best validation loss: {best_val_loss:.4f} at epoch {best_epoch}.")
 
