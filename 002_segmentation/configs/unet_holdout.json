@@ -14,11 +14,16 @@
     },
     "training": {
         "learning_rate": 1e-3,
-        "batch_size": 4,
+        "batch_size": 8,
         "total_epochs": 100,
         "early_stopping_patience": 5,
         "seed": 42,
-        "prediction_threshold": 0.5
+        "prediction_threshold": 0.5,
+        "parallel_tile_processing": true,
+        "tile_chunk_size": null,
+        "activation_checkpointing": false,
+        "validation_on_gpu": true,
+        "non_blocking_transfer": true
     },
     "loss": {
         "name": "BCEDiceLoss",
@@ -28,7 +33,7 @@
         "weight_decay": 0.0001
     },
     "dataloader": {
-        "num_workers": 0,
+        "num_workers": 6,
         "persistent_workers": true,
         "prefetch_factor": 2,
         "train_shuffle": true

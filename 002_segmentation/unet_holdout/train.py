@@ -102,6 +102,14 @@ EARLY_STOPPING_PATIENCE = TRAINING_CONFIG["early_stopping_patience"]
 
 PRED_THRESHOLD = TRAINING_CONFIG["prediction_threshold"]
 
+# Use the original memory-saving behavior when these optional settings are
+# absent from an older configuration file.
+PARALLEL_TILE_PROCESSING = TRAINING_CONFIG.get("parallel_tile_processing", False)
+TILE_CHUNK_SIZE = TRAINING_CONFIG.get("tile_chunk_size")
+ACTIVATION_CHECKPOINTING = TRAINING_CONFIG.get("activation_checkpointing", True)
+VALIDATION_ON_GPU = TRAINING_CONFIG.get("validation_on_gpu", False)
+NON_BLOCKING_TRANSFER = TRAINING_CONFIG.get("non_blocking_transfer", False)
+
 LOSS_NAME = LOSS_CONFIG["name"]
 LOSS_SMOOTH = LOSS_CONFIG["smooth"]
 
@@ -275,6 +283,11 @@ def main() -> None:
     loss_fn = create_loss_function()
     print(f"Loss function: {LOSS_NAME}")
     print(f"Loss smooth: {LOSS_SMOOTH}")
+    print(f"Parallel tile processing: {PARALLEL_TILE_PROCESSING}")
+    print(f"Tile chunk size: {TILE_CHUNK_SIZE}")
+    print(f"Activation checkpointing: {ACTIVATION_CHECKPOINTING}")
+    print(f"Validation on GPU: {VALIDATION_ON_GPU}")
+    print(f"Non-blocking transfer: {NON_BLOCKING_TRANSFER}")
 
     optimizer = optim.AdamW(
         model.parameters(), lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY_OPTM
@@ -333,6 +346,10 @@ def main() -> None:
             scaler=scaler,
             amp_enabled=TRAIN_AMP_ENABLED,
             tile_grid_size=TILE_GRID_SIZE,
+            parallel_tile_processing=PARALLEL_TILE_PROCESSING,
+            tile_chunk_size=TILE_CHUNK_SIZE,
+            activation_checkpointing=ACTIVATION_CHECKPOINTING,
+            non_blocking_transfer=NON_BLOCKING_TRANSFER,
         )
 
         # evaluate the updated model on the validation split
@@ -345,6 +362,11 @@ def main() -> None:
             device=DEVICE,
             threshold=PRED_THRESHOLD,
             tile_grid_size=TILE_GRID_SIZE,
+            amp_enabled=TRAIN_AMP_ENABLED,
+            parallel_tile_processing=PARALLEL_TILE_PROCESSING,
+            tile_chunk_size=TILE_CHUNK_SIZE,
+            validation_on_gpu=VALIDATION_ON_GPU,
+            non_blocking_transfer=NON_BLOCKING_TRANSFER,
         )
 
         current_epoch = epoch + 1
