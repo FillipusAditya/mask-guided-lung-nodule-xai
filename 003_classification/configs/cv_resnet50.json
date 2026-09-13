@@ -1,6 +1,6 @@
 {
     "experiment": {
-        "id": "dc730a13-5813-4d87-b15c-3b630deb32b5",
+        "id": "a0d90f9e-3dd4-4de0-98af-12858696f613",
         "component": "classification/cv_resnet50"
     },
     "output": {
@@ -8,9 +8,9 @@
         "config_snapshot_filename": "cv_resnet50.json"
     },
     "data": {
-        "dataset_root": "000_dataset/_segmentation_dataset_v2",
-        "metadata_path": "000_dataset/_segmentation_dataset_v2/004_classification_cv_5fold_seed42.csv",
-        "ct_path_column": "ct_windowed_path",
+        "dataset_root": "000_dataset_v2/_segmentation_dataset",
+        "metadata_path": "000_dataset_v2/_segmentation_dataset/004_classification_cv_5fold_seed42.csv",
+        "ct_path_column": "ct_parenchyma_path",
         "input_height": 224,
         "input_width": 224,
         "class_to_idx": {
@@ -53,8 +53,8 @@
         "nesterov": false
     },
     "dataloader": {
-        "num_workers": 0,
-        "persistent_workers": false,
+        "num_workers": 2,
+        "persistent_workers": true,
         "prefetch_factor": 2,
         "pin_memory": true,
         "train_shuffle": true,
