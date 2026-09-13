@@ -78,7 +78,10 @@ def parse_args() -> argparse.Namespace:
         "--checkpoint",
         type=Path,
         default=None,
-        help="Checkpoint path (default: <result_dir>/best_model.pth).",
+        help=(
+            "Checkpoint path (default: <result_dir>/best_model_by_dice.pth, "
+            "with legacy best_model.pth fallback)."
+        ),
     )
     parser.add_argument(
         "--output-dir",
@@ -162,7 +165,11 @@ def select_device(requested: str) -> torch.device:
     return torch.device(requested)
 
 
-def load_model(checkpoint_path: Path, device: torch.device) -> UNET:
+def load_model(
+    checkpoint_path: Path,
+    device: torch.device,
+    features: list[int],
+) -> UNET:
     """Load either best-model weights or a complete training checkpoint."""
 
     if not checkpoint_path.is_file():
@@ -181,7 +188,7 @@ def load_model(checkpoint_path: Path, device: torch.device) -> UNET:
     if state_dict and all(str(key).startswith("module.") for key in state_dict):
         state_dict = {str(key)[7:]: value for key, value in state_dict.items()}
 
-    model = UNET(features=[16, 32, 64, 128])
+    model = UNET(features=features)
     model.load_state_dict(state_dict)
     model.to(device)
     model.eval()
@@ -1144,17 +1151,20 @@ def main() -> None:
         raise ValueError("--dpi must be greater than zero.")
 
     result_dir = resolve_from_project(args.result_dir).resolve()
-    checkpoint_path = (
-        resolve_from_project(args.checkpoint).resolve()
-        if args.checkpoint is not None
-        else result_dir / "best_model.pth"
-    )
+    config, _ = load_run_config(result_dir)
+    if args.checkpoint is not None:
+        checkpoint_path = resolve_from_project(args.checkpoint).resolve()
+    else:
+        checkpoint_path = result_dir / "best_model_by_dice.pth"
+        legacy_checkpoint_path = result_dir / "best_model.pth"
+        if not checkpoint_path.is_file() and legacy_checkpoint_path.is_file():
+            checkpoint_path = legacy_checkpoint_path
+
     output_dir = (
         resolve_from_project(args.output_dir).resolve()
         if args.output_dir is not None
         else result_dir / "inference"
     )
-    config, _ = load_run_config(result_dir)
     threshold = float(
         config["training"]["prediction_threshold"]
         if args.threshold is None
@@ -1163,8 +1173,14 @@ def main() -> None:
     if not 0.0 <= threshold <= 1.0:
         raise ValueError("--threshold must be between 0 and 1.")
 
+    features = [
+        int(feature)
+        for feature in config.get("model", {}).get(
+            "features", [16, 32, 64, 128]
+        )
+    ]
     device = select_device(args.device)
-    model = load_model(checkpoint_path, device)
+    model = load_model(checkpoint_path, device, features)
     output_dir.mkdir(parents=True, exist_ok=True)
     probability_npy_dir = output_dir / "probability_npy"
     visualization_root = output_dir / "visualization"

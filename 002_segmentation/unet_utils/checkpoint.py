@@ -1,6 +1,7 @@
 """Utilities for saving and loading U-Net training checkpoints."""
 
 import random
+import warnings
 from pathlib import Path
 
 import numpy as np
@@ -13,10 +14,14 @@ def save_checkpoint(
     model: nn.Module,
     optimizer: Optimizer,
     scaler: torch.amp.GradScaler,
+    scheduler: torch.optim.lr_scheduler.LRScheduler | None,
     loss_config: dict[str, object],
+    scheduler_config: dict[str, object],
     epoch: int,
     best_val_loss: float,
-    best_epoch: int,
+    best_loss_epoch: int,
+    best_val_dice: float,
+    best_dice_epoch: int,
     epochs_without_improvement: int,
     save_path: Path,
 ) -> None:
@@ -31,14 +36,22 @@ def save_checkpoint(
         Training optimizer.
     scaler : torch.amp.GradScaler
         Gradient scaler used for automatic mixed-precision training.
+    scheduler : torch.optim.lr_scheduler.LRScheduler, optional
+        Learning-rate scheduler whose state will be saved when enabled.
     loss_config : dict[str, object]
         Loss function configuration used by the experiment.
+    scheduler_config : dict[str, object]
+        Learning-rate scheduler configuration used by the experiment.
     epoch : int
         Number of completed epochs.
     best_val_loss : float
         Lowest validation loss observed so far.
-    best_epoch : int
+    best_loss_epoch : int
         Epoch associated with the lowest validation loss.
+    best_val_dice : float
+        Highest validation Dice score observed so far.
+    best_dice_epoch : int
+        Epoch associated with the highest validation Dice score.
     epochs_without_improvement : int
         Consecutive epochs completed without a lower validation loss.
     save_path : Path
@@ -51,9 +64,15 @@ def save_checkpoint(
         "model_state_dict": model.state_dict(),
         "optimizer_state_dict": optimizer.state_dict(),
         "scaler_state_dict": scaler.state_dict(),
+        "scheduler_state_dict": (
+            scheduler.state_dict() if scheduler is not None else None
+        ),
         "loss_config": dict(loss_config),
+        "scheduler_config": dict(scheduler_config),
         "best_val_loss": best_val_loss,
-        "best_epoch": best_epoch,
+        "best_loss_epoch": best_loss_epoch,
+        "best_val_dice": best_val_dice,
+        "best_dice_epoch": best_dice_epoch,
         "epochs_without_improvement": epochs_without_improvement,
         "python_rng_state": random.getstate(),
         "numpy_rng_state": {
@@ -77,7 +96,7 @@ def save_checkpoint(
 
 def save_best_model(model: nn.Module, save_path: Path) -> None:
     """
-    Save model parameters associated with the lowest validation loss.
+    Save model parameters associated with the selected validation metric.
 
     Parameters
     ----------
@@ -97,8 +116,10 @@ def load_checkpoint(
     model: nn.Module,
     optimizer: Optimizer,
     scaler: torch.amp.GradScaler,
+    scheduler: torch.optim.lr_scheduler.LRScheduler | None,
     expected_loss_config: dict[str, object],
-) -> tuple[int, float, int, int]:
+    expected_scheduler_config: dict[str, object],
+) -> tuple[int, float, int, float, int, int]:
     """
     Restore training state and return the saved training progress.
 
@@ -112,14 +133,19 @@ def load_checkpoint(
         Optimizer whose state will be restored.
     scaler : torch.amp.GradScaler
         Gradient scaler whose state will be restored.
+    scheduler : torch.optim.lr_scheduler.LRScheduler, optional
+        Learning-rate scheduler whose state will be restored when available.
     expected_loss_config : dict[str, object]
         Loss configuration required for the resumed experiment.
+    expected_scheduler_config : dict[str, object]
+        Scheduler configuration required for the resumed experiment.
 
     Returns
     -------
-    tuple[int, float, int, int]
-        Completed epochs, lowest validation loss, its epoch, and consecutive
-        epochs without improvement.
+    tuple[int, float, int, float, int, int]
+        Completed epochs, lowest validation loss and its epoch, highest
+        validation Dice score and its epoch, and consecutive epochs without
+        validation-loss improvement.
 
     Raises
     ------
@@ -146,9 +172,30 @@ def load_checkpoint(
             f"configuration uses {expected_loss_config!r}."
         )
 
+    checkpoint_scheduler_config = checkpoint.get("scheduler_config")
+    if (
+        checkpoint_scheduler_config is not None
+        and checkpoint_scheduler_config != expected_scheduler_config
+    ):
+        raise ValueError(
+            "Scheduler configuration mismatch when resuming training: "
+            f"checkpoint uses {checkpoint_scheduler_config!r}, but the current "
+            f"configuration uses {expected_scheduler_config!r}."
+        )
+
     model.load_state_dict(checkpoint["model_state_dict"])
     optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
     scaler.load_state_dict(checkpoint["scaler_state_dict"])
+
+    scheduler_state_dict = checkpoint.get("scheduler_state_dict")
+    if scheduler is not None and scheduler_state_dict is not None:
+        scheduler.load_state_dict(scheduler_state_dict)
+    elif scheduler is not None and scheduler_state_dict is None:
+        warnings.warn(
+            "Checkpoint has no scheduler state. The configured scheduler will "
+            "start with a new state after resume.",
+            stacklevel=2,
+        )
 
     random.setstate(checkpoint["python_rng_state"])
 
@@ -170,12 +217,23 @@ def load_checkpoint(
 
     completed_epochs = int(checkpoint["epoch"])
     best_val_loss = float(checkpoint.get("best_val_loss", float("inf")))
-    best_epoch = int(checkpoint.get("best_epoch", 0))
+    best_loss_epoch = int(
+        checkpoint.get("best_loss_epoch", checkpoint.get("best_epoch", 0))
+    )
+    best_val_dice = float(checkpoint.get("best_val_dice", float("-inf")))
+    best_dice_epoch = int(checkpoint.get("best_dice_epoch", 0))
     epochs_without_improvement = int(
         checkpoint.get(
             "epochs_without_improvement",
-            completed_epochs - best_epoch if best_epoch > 0 else 0,
+            completed_epochs - best_loss_epoch if best_loss_epoch > 0 else 0,
         )
     )
 
-    return completed_epochs, best_val_loss, best_epoch, epochs_without_improvement
+    return (
+        completed_epochs,
+        best_val_loss,
+        best_loss_epoch,
+        best_val_dice,
+        best_dice_epoch,
+        epochs_without_improvement,
+    )

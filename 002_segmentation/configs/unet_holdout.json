@@ -12,6 +12,9 @@
         "input_width": 512,
         "tile_grid_size": 4
     },
+    "model": {
+        "features": [16, 32, 64, 128]
+    },
     "training": {
         "learning_rate": 1e-3,
         "batch_size": 8,
@@ -31,6 +34,14 @@
     },
     "optimizer": {
         "weight_decay": 0.0001
+    },
+    "scheduler": {
+        "enabled": true,
+        "name": "ReduceLROnPlateau",
+        "factor": 0.5,
+        "patience": 2,
+        "threshold": 0.0001,
+        "min_lr": 1e-6
     },
     "dataloader": {
         "num_workers": 6,

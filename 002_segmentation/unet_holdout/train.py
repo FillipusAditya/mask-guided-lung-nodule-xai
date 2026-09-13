@@ -1,5 +1,6 @@
 import json
 from pathlib import Path
+import shutil
 import sys
 from uuid import uuid4
 
@@ -39,9 +40,11 @@ with CONFIG_PATH.open("r", encoding="utf-8") as file:
 
 OUTPUT_CONFIG = CONFIG["output"]
 DATA_CONFIG = CONFIG["data"]
+MODEL_CONFIG = CONFIG.get("model", {"features": [16, 32, 64, 128]})
 TRAINING_CONFIG = CONFIG["training"]
 LOSS_CONFIG = CONFIG["loss"]
 OPTIMIZER_CONFIG = CONFIG["optimizer"]
+SCHEDULER_CONFIG = CONFIG.get("scheduler", {"enabled": False})
 DATALOADER_CONFIG = CONFIG["dataloader"]
 AMP_CONFIG = CONFIG["amp"]
 CHECKPOINT_CONFIG = CONFIG["checkpoint"]
@@ -73,6 +76,9 @@ else:
 
 TRAINING_LOG_PATH = OUTPUT_DIR / "training_log.csv"
 LAST_CHECKPOINT_PATH = OUTPUT_DIR / "last_checkpoint.pth"
+BEST_LOSS_MODEL_PATH = OUTPUT_DIR / "best_model_by_loss.pth"
+BEST_DICE_MODEL_PATH = OUTPUT_DIR / "best_model_by_dice.pth"
+CONFIG_SNAPSHOT_PATH = OUTPUT_DIR / "unet_holdout.json"
 
 # prepare dataset, split, and tiling settings
 DATASET_ROOT = PROJECT_ROOT / DATA_CONFIG["dataset_root"]
@@ -84,6 +90,7 @@ IMAGE_PATH_COLUMN = DATA_CONFIG["image_path_column"]
 INPUT_HEIGHT = DATA_CONFIG["input_height"]
 INPUT_WIDTH = DATA_CONFIG["input_width"]
 TILE_GRID_SIZE = DATA_CONFIG["tile_grid_size"]
+MODEL_FEATURES = [int(feature) for feature in MODEL_CONFIG["features"]]
 
 TRAIN_SHUFFLE = DATALOADER_CONFIG["train_shuffle"]
 
@@ -114,6 +121,7 @@ LOSS_NAME = LOSS_CONFIG["name"]
 LOSS_SMOOTH = LOSS_CONFIG["smooth"]
 
 WEIGHT_DECAY_OPTM = OPTIMIZER_CONFIG["weight_decay"]
+SCHEDULER_ENABLED = SCHEDULER_CONFIG["enabled"]
 
 # select the runtime device and configure automatic mixed precision
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
@@ -153,6 +161,58 @@ def create_loss_function():
     loss_class = loss_functions[LOSS_NAME]
 
     return loss_class(smooth=LOSS_SMOOTH)
+
+
+def create_learning_rate_scheduler(optimizer: optim.Optimizer):
+    """
+    Create the configured validation-loss learning-rate scheduler.
+
+    Parameters
+    ----------
+    optimizer : optim.Optimizer
+        Optimizer whose learning rate will be adjusted.
+
+    Returns
+    -------
+    torch.optim.lr_scheduler.ReduceLROnPlateau or None
+        Configured scheduler, or ``None`` when scheduling is disabled.
+
+    Raises
+    ------
+    ValueError
+        If the configured scheduler name is unsupported.
+    """
+
+    if not SCHEDULER_ENABLED:
+        return None
+
+    scheduler_name = SCHEDULER_CONFIG["name"]
+    if scheduler_name != "ReduceLROnPlateau":
+        raise ValueError(
+            f"Unsupported learning-rate scheduler: {scheduler_name!r}. "
+            "Supported scheduler: ReduceLROnPlateau."
+        )
+
+    return optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer=optimizer,
+        mode="min",
+        factor=float(SCHEDULER_CONFIG["factor"]),
+        patience=int(SCHEDULER_CONFIG["patience"]),
+        threshold=float(SCHEDULER_CONFIG["threshold"]),
+        min_lr=float(SCHEDULER_CONFIG["min_lr"]),
+    )
+
+
+def save_configuration_snapshot() -> None:
+    """
+    Copy the exact active JSON configuration into the experiment directory.
+    """
+
+    if CONFIG_SNAPSHOT_PATH.exists():
+        return
+
+    shutil.copy2(CONFIG_PATH, CONFIG_SNAPSHOT_PATH)
+    print(f"Configuration snapshot saved to: {CONFIG_SNAPSHOT_PATH}")
 
 
 def generate_training_visualizations() -> None:
@@ -234,6 +294,8 @@ def main() -> None:
             f"Training log not found for resumed experiment: {TRAINING_LOG_PATH}"
         )
 
+    save_configuration_snapshot()
+
     # initialize random number generators for reproducible training
     set_seed(SEED)
 
@@ -277,12 +339,13 @@ def main() -> None:
 
     # initialize the model, loss function, optimizer, and gradient scaler
     model = UNET(
-        features=[16, 32, 64, 128],
+        features=MODEL_FEATURES,
     ).to(DEVICE)
 
     loss_fn = create_loss_function()
     print(f"Loss function: {LOSS_NAME}")
     print(f"Loss smooth: {LOSS_SMOOTH}")
+    print(f"U-Net features: {MODEL_FEATURES}")
     print(f"Parallel tile processing: {PARALLEL_TILE_PROCESSING}")
     print(f"Tile chunk size: {TILE_CHUNK_SIZE}")
     print(f"Activation checkpointing: {ACTIVATION_CHECKPOINTING}")
@@ -292,26 +355,38 @@ def main() -> None:
     optimizer = optim.AdamW(
         model.parameters(), lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY_OPTM
     )
+    scheduler = create_learning_rate_scheduler(optimizer)
+
+    if scheduler is None:
+        print("Learning-rate scheduler: disabled")
+    else:
+        print(f"Learning-rate scheduler: {SCHEDULER_CONFIG['name']}")
 
     scaler = torch.amp.GradScaler("cuda", enabled=TRAIN_AMP_ENABLED)
 
     # restore all training states when continuing from an earlier run
     completed_epochs = 0
     best_val_loss = float("inf")
-    best_epoch = 0
+    best_loss_epoch = 0
+    best_val_dice = float("-inf")
+    best_dice_epoch = 0
     epochs_without_improvement = 0
     if RESUME_CHECKPOINT_PATH is not None:
         (
             completed_epochs,
             best_val_loss,
-            best_epoch,
+            best_loss_epoch,
+            best_val_dice,
+            best_dice_epoch,
             epochs_without_improvement,
         ) = load_checkpoint(
             checkpoint_path=RESUME_CHECKPOINT_PATH,
             model=model,
             optimizer=optimizer,
             scaler=scaler,
+            scheduler=scheduler,
             expected_loss_config=LOSS_CONFIG,
+            expected_scheduler_config=SCHEDULER_CONFIG,
         )
 
         # discard log entries that were written after the latest checkpoint
@@ -370,23 +445,35 @@ def main() -> None:
         )
 
         current_epoch = epoch + 1
-        is_best = val_metrics["loss"] < best_val_loss
-        if is_best:
+        is_best_loss = val_metrics["loss"] < best_val_loss
+        is_best_dice = val_metrics["dice"] > best_val_dice
+
+        if is_best_loss:
             best_val_loss = val_metrics["loss"]
-            best_epoch = current_epoch
+            best_loss_epoch = current_epoch
             epochs_without_improvement = 0
         else:
             epochs_without_improvement += 1
 
-        # replace the best model when validation loss reaches a new minimum
-        if is_best:
-            best_model_path = OUTPUT_DIR / "best_model.pth"
+        if is_best_dice:
+            best_val_dice = val_metrics["dice"]
+            best_dice_epoch = current_epoch
 
-            save_best_model(model=model, save_path=best_model_path)
+        # keep independent weights for the best validation loss and Dice score
+        if is_best_loss:
+            save_best_model(model=model, save_path=BEST_LOSS_MODEL_PATH)
 
             print(
                 f"New best validation loss: {best_val_loss:.4f} "
-                f"at epoch {best_epoch}."
+                f"at epoch {best_loss_epoch}."
+            )
+
+        if is_best_dice:
+            save_best_model(model=model, save_path=BEST_DICE_MODEL_PATH)
+
+            print(
+                f"New best validation Dice: {best_val_dice:.4f} "
+                f"at epoch {best_dice_epoch}."
             )
 
         # write the completed epoch metrics immediately before its checkpoint
@@ -402,15 +489,31 @@ def main() -> None:
             specificity=val_metrics["specificity"],
         )
 
+        # ReduceLROnPlateau uses validation loss to decide when to lower the LR.
+        previous_learning_rate = optimizer.param_groups[0]["lr"]
+        if scheduler is not None:
+            scheduler.step(val_metrics["loss"])
+        current_learning_rate = optimizer.param_groups[0]["lr"]
+
+        if current_learning_rate != previous_learning_rate:
+            print(
+                "Learning rate reduced from "
+                f"{previous_learning_rate:.2e} to {current_learning_rate:.2e}."
+            )
+
         # keep the latest state in the current experiment result directory
         save_checkpoint(
             model=model,
             optimizer=optimizer,
             scaler=scaler,
+            scheduler=scheduler,
             loss_config=LOSS_CONFIG,
+            scheduler_config=SCHEDULER_CONFIG,
             epoch=current_epoch,
             best_val_loss=best_val_loss,
-            best_epoch=best_epoch,
+            best_loss_epoch=best_loss_epoch,
+            best_val_dice=best_val_dice,
+            best_dice_epoch=best_dice_epoch,
             epochs_without_improvement=epochs_without_improvement,
             save_path=LAST_CHECKPOINT_PATH,
         )
@@ -424,7 +527,14 @@ def main() -> None:
 
     generate_training_visualizations()
     print(f"Last checkpoint saved to: {LAST_CHECKPOINT_PATH}")
-    print(f"Best validation loss: {best_val_loss:.4f} at epoch {best_epoch}.")
+    print(
+        f"Best validation loss: {best_val_loss:.4f} "
+        f"at epoch {best_loss_epoch}."
+    )
+    print(
+        f"Best validation Dice: {best_val_dice:.4f} "
+        f"at epoch {best_dice_epoch}."
+    )
 
 
 if __name__ == "__main__":
