@@ -1,5 +1,3 @@
-"""Evaluate the five-fold ResNet-50 baseline with Grad-CAM and LRP."""
-
 from __future__ import annotations
 
 import argparse
@@ -14,6 +12,7 @@ import matplotlib
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+from matplotlib.colors import to_rgba
 import numpy as np
 import pandas as pd
 import torch
@@ -34,7 +33,6 @@ from ..utils import (
 )
 from ..fulltuning_resnet50 import train as transform_utils
 
-
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 CONFIG_PATH = PROJECT_ROOT / "003_classification/configs/cv_resnet50.json"
 with CONFIG_PATH.open("r", encoding="utf-8") as file:
@@ -46,16 +44,23 @@ def resolve_path(value: str | Path) -> Path:
     return path.resolve() if path.is_absolute() else (PROJECT_ROOT / path).resolve()
 
 
+DEFAULT_EXPERIMENT_ID = "a0d90f9e-3dd4-4de0-98af-12858696f613"
+DEFAULT_RESULT_COMPONENT = "classification/baseline_resnet50"
 DEFAULT_RESULT_DIR = (
     resolve_path(DEFAULT_CONFIG["output"]["root_directory"])
-    / str(DEFAULT_CONFIG["experiment"]["id"])
-    / str(DEFAULT_CONFIG["experiment"]["component"])
+    / DEFAULT_EXPERIMENT_ID
+    / DEFAULT_RESULT_COMPONENT
 )
 DEFAULT_DATASET_ROOT = resolve_path(DEFAULT_CONFIG["data"]["dataset_root"])
+DEFAULT_METADATA_PATH = resolve_path(DEFAULT_CONFIG["data"]["metadata_path"])
 SAMPLE_FILENAME_PATTERN = re.compile(
     r"^(?P<study>.+)_(?P<nodule_kind>finding|cluster)_"
     r"(?P<nodule_number>\d+)_slice_(?P<slice_index>\d+)\.npy$"
 )
+GROUND_TRUTH_FILL_COLOR = "#00FFFF"
+GROUND_TRUTH_INNER_OUTLINE_COLOR = "#FFFF00"
+GROUND_TRUTH_OUTER_OUTLINE_COLOR = "#000000"
+GROUND_TRUTH_FILL_ALPHA = 0.25
 
 
 def normalize_unsigned(values: torch.Tensor) -> torch.Tensor:
@@ -115,12 +120,72 @@ def load_display_array(path: Path, description: str) -> np.ndarray:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("result_dir", type=Path, nargs="?", default=DEFAULT_RESULT_DIR)
-    parser.add_argument("--batch-size", type=int, default=2)
-    parser.add_argument("--num-workers", type=int, default=0)
-    parser.add_argument("--device", choices=("auto", "cpu", "cuda"), default="auto")
-    parser.add_argument("--max-samples", type=int, default=None)
-    parser.add_argument("--dpi", type=int, default=120)
+    parser.add_argument(
+        "result_dir",
+        type=Path,
+        nargs="?",
+        default=DEFAULT_RESULT_DIR,
+        help=(
+            "Completed baseline result directory. The default is "
+            f"{DEFAULT_RESULT_DIR}."
+        ),
+    )
+    parser.add_argument(
+        "--dataset-root",
+        type=Path,
+        default=None,
+        help=(
+            "Local dataset root override. By default the script uses "
+            f"{DEFAULT_DATASET_ROOT}."
+        ),
+    )
+    parser.add_argument(
+        "--metadata-path",
+        type=Path,
+        default=None,
+        help=(
+            "Local CV metadata override. By default the script uses "
+            f"{DEFAULT_METADATA_PATH}."
+        ),
+    )
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=1,
+        help="Inference batch size. One is safest for five-model XAI.",
+    )
+    parser.add_argument(
+        "--num-workers",
+        type=int,
+        default=0,
+        help="DataLoader workers. Zero is the safest local default.",
+    )
+    parser.add_argument(
+        "--device",
+        choices=("auto", "cpu", "cuda"),
+        default="auto",
+        help="Use CUDA when available, otherwise use the CPU.",
+    )
+    parser.add_argument(
+        "--max-samples",
+        type=int,
+        default=None,
+        help="Optionally limit holdout samples, for example 8 for a smoke test.",
+    )
+    parser.add_argument(
+        "--dpi",
+        type=int,
+        default=120,
+        help="DPI used for Grad-CAM and LRP study figures.",
+    )
+    parser.add_argument(
+        "--force-inference",
+        action="store_true",
+        help=(
+            "Run model inference again even when cached predictions, "
+            "Grad-CAM maps, and LRP maps are available."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -143,29 +208,78 @@ def load_fold_config(result_dir: Path) -> dict[str, Any]:
     return config
 
 
-def relocate_dataset_paths(config: dict[str, Any]) -> dict[str, Any]:
+def first_existing_path(
+    candidates: tuple[Path, ...],
+    path_type: str,
+) -> Path:
+    """Return the first existing file or directory from the candidates."""
+
+    unique_candidates = tuple(dict.fromkeys(path.resolve() for path in candidates))
+    if path_type == "directory":
+        existing_path = next(
+            (path for path in unique_candidates if path.is_dir()),
+            None,
+        )
+    elif path_type == "file":
+        existing_path = next(
+            (path for path in unique_candidates if path.is_file()),
+            None,
+        )
+    else:
+        raise ValueError("path_type must be 'directory' or 'file'.")
+
+    if existing_path is None:
+        checked_paths = "\n".join(f"  - {path}" for path in unique_candidates)
+        raise FileNotFoundError(
+            f"No existing {path_type} was found. Checked:\n{checked_paths}"
+        )
+    return existing_path
+
+
+def relocate_dataset_paths(
+    config: dict[str, Any],
+    dataset_root_override: Path | None = None,
+    metadata_path_override: Path | None = None,
+) -> dict[str, Any]:
+    """Replace unavailable Colab paths with local dataset paths."""
+
     config = dict(config)
     data = dict(config["data"])
     configured_root = resolve_path(data["dataset_root"])
-    dataset_root = next(
-        (path for path in (configured_root, DEFAULT_DATASET_ROOT) if path.is_dir()),
-        None,
+    root_candidates = tuple(
+        path
+        for path in (
+            (
+                resolve_path(dataset_root_override)
+                if dataset_root_override is not None
+                else None
+            ),
+            configured_root,
+            DEFAULT_DATASET_ROOT,
+        )
+        if path is not None
     )
-    if dataset_root is None:
-        raise FileNotFoundError("Dataset root was not found.")
+    dataset_root = first_existing_path(root_candidates, "directory")
+
     configured_metadata = resolve_path(data["metadata_path"])
-    metadata_path = next(
-        (
-            path
-            for path in (configured_metadata, dataset_root / configured_metadata.name)
-            if path.is_file()
-        ),
-        None,
+    metadata_candidates = tuple(
+        path
+        for path in (
+            (
+                resolve_path(metadata_path_override)
+                if metadata_path_override is not None
+                else None
+            ),
+            configured_metadata,
+            dataset_root / configured_metadata.name,
+            DEFAULT_METADATA_PATH,
+        )
+        if path is not None
     )
-    if metadata_path is None:
-        raise FileNotFoundError("CV metadata was not found.")
-    data["dataset_root"] = str(dataset_root.resolve())
-    data["metadata_path"] = str(metadata_path.resolve())
+    metadata_path = first_existing_path(metadata_candidates, "file")
+
+    data["dataset_root"] = str(dataset_root)
+    data["metadata_path"] = str(metadata_path)
     config["data"] = data
     return config
 
@@ -268,7 +382,9 @@ class GradCAM:
             raise RuntimeError("Grad-CAM hooks did not capture tensors.")
         weights = self.gradients.mean(dim=(2, 3), keepdim=True)
         maps = torch.relu((weights * self.activations).sum(dim=1, keepdim=True))
-        maps = F.interpolate(maps, inputs.shape[-2:], mode="bilinear", align_corners=False)
+        maps = F.interpolate(
+            maps, inputs.shape[-2:], mode="bilinear", align_corners=False
+        )
         return normalize_unsigned(maps[:, 0]).detach()
 
     def close(self) -> None:
@@ -295,6 +411,36 @@ def generate_lrp(
     return normalize_signed(relevance.sum(dim=1)).detach()
 
 
+def add_ground_truth_overlay(axis, mask: np.ndarray) -> None:
+    """Draw a transparent mask with a high-contrast double outline."""
+
+    binary_mask = np.asarray(mask, dtype=bool)
+    if not binary_mask.any():
+        return
+
+    colored_mask = np.zeros((*binary_mask.shape, 4), dtype=np.float32)
+    fill_color = to_rgba(
+        GROUND_TRUTH_FILL_COLOR,
+        alpha=GROUND_TRUTH_FILL_ALPHA,
+    )
+    colored_mask[binary_mask] = fill_color
+    axis.imshow(colored_mask, interpolation="nearest")
+
+    mask_values = binary_mask.astype(np.float32)
+    axis.contour(
+        mask_values,
+        levels=[0.5],
+        colors=[GROUND_TRUTH_OUTER_OUTLINE_COLOR],
+        linewidths=3.0,
+    )
+    axis.contour(
+        mask_values,
+        levels=[0.5],
+        colors=[GROUND_TRUTH_INNER_OUTLINE_COLOR],
+        linewidths=1.5,
+    )
+
+
 def save_study_figure(
     study_id: str,
     frame: pd.DataFrame,
@@ -313,7 +459,12 @@ def save_study_figure(
     sections = figure.subfigures(
         len(groups), 1, squeeze=False, height_ratios=[max(1, len(g)) for _, g in groups]
     )
-    titles = ("Full CT scan", "Ground-truth nodule mask", "Grad-CAM overlay", "LRP overlay")
+    titles = (
+        "Full CT scan",
+        "Ground-truth nodule mask",
+        "Grad-CAM + GT mask",
+        "LRP + GT mask",
+    )
     for section, (nodule_id, nodule_frame) in zip(sections.flat, groups, strict=True):
         nodule_frame = nodule_frame.sort_values("xai_slice_index")
         labels = ", ".join(sorted(nodule_frame["label"].astype(str).unique()))
@@ -342,20 +493,30 @@ def save_study_figure(
             lrp = resize_map(lrp, shape, "bilinear")
             row_axes = axes[row_index]
             row_axes[0].imshow(display, cmap="gray", vmin=0, vmax=1)
-            row_axes[1].imshow(mask, cmap="gray", vmin=0, vmax=1, interpolation="nearest")
+            row_axes[1].imshow(
+                mask, cmap="gray", vmin=0, vmax=1, interpolation="nearest"
+            )
             row_axes[2].imshow(display, cmap="gray", vmin=0, vmax=1)
             row_axes[2].imshow(gradcam, cmap="jet", alpha=0.45, vmin=0, vmax=1)
+            add_ground_truth_overlay(row_axes[2], mask)
             row_axes[3].imshow(display, cmap="gray", vmin=0, vmax=1)
             row_axes[3].imshow(lrp, cmap="seismic", alpha=0.50, vmin=-1, vmax=1)
+            add_ground_truth_overlay(row_axes[3], mask)
             if row_index == 0:
                 for axis, title in zip(row_axes, titles, strict=True):
                     axis.set_title(title, fontsize=11, weight="bold", pad=8)
-            probability = float(row[f"probability_{str(row['predicted_class']).lower()}"])
+            probability = float(
+                row[f"probability_{str(row['predicted_class']).lower()}"]
+            )
             row_axes[0].text(
-                -0.04, 0.5,
+                -0.04,
+                0.5,
                 f"Slice {int(row['xai_slice_index'])}\nPred: {row['predicted_class']}\np={probability:.3f}",
                 transform=row_axes[0].transAxes,
-                ha="right", va="center", fontsize=9, weight="bold",
+                ha="right",
+                va="center",
+                fontsize=9,
+                weight="bold",
             )
             for axis in row_axes:
                 axis.axis("off")
@@ -364,14 +525,21 @@ def save_study_figure(
         fontsize=16,
         weight="bold",
     )
-    figure.savefig(output_path, dpi=dpi, bbox_inches="tight", facecolor=figure.get_facecolor())
+    figure.savefig(
+        output_path, dpi=dpi, bbox_inches="tight", facecolor=figure.get_facecolor()
+    )
     plt.close(figure)
 
 
 def save_visualizations(
-    predictions: pd.DataFrame, dataset, gradcam_dir: Path, lrp_dir: Path,
-    visualization_dir: Path, dpi: int
+    predictions: pd.DataFrame,
+    dataset,
+    gradcam_dir: Path,
+    lrp_dir: Path,
+    visualization_dir: Path,
+    dpi: int,
 ) -> None:
+    visualization_dir.mkdir(parents=True, exist_ok=True)
     parsed = predictions["filename"].map(parse_sample_identifiers)
     frame = predictions.copy()
     frame["xai_study"] = parsed.map(lambda value: value[0])
@@ -382,16 +550,79 @@ def save_visualizations(
     )
     frame = frame.sort_values(["xai_study", "xai_nodule_order", "xai_slice_index"])
     groups = list(frame.groupby("xai_study", sort=False))
-    for study_id, study_frame in tqdm(groups, desc="Rendering study visualizations", unit="study"):
+    for study_id, study_frame in tqdm(
+        groups, desc="Rendering study visualizations", unit="study"
+    ):
         save_study_figure(
-            str(study_id), study_frame, dataset, gradcam_dir, lrp_dir,
-            visualization_dir / f"{study_id}.png", dpi,
+            str(study_id),
+            study_frame,
+            dataset,
+            gradcam_dir,
+            lrp_dir,
+            visualization_dir / f"{study_id}.png",
+            dpi,
         )
 
 
+def load_cached_predictions(
+    output_dir: Path,
+    max_samples: int | None,
+    ct_path_column: str,
+) -> pd.DataFrame | None:
+    """Load completed inference artifacts for visualization-only execution."""
+
+    predictions_path = output_dir / "test_predictions.csv"
+    if not predictions_path.is_file():
+        return None
+
+    predictions = pd.read_csv(predictions_path)
+    required_columns = {
+        "filename",
+        ct_path_column,
+        "mask_path",
+        "label",
+        "predicted_class",
+        "probability_benign",
+        "probability_malignant",
+    }
+    missing_columns = required_columns - set(predictions.columns)
+    if missing_columns:
+        raise ValueError(
+            "Cached test predictions are missing columns: " f"{sorted(missing_columns)}"
+        )
+    if predictions.empty:
+        raise ValueError(f"Cached predictions are empty: {predictions_path}")
+    if max_samples is not None:
+        predictions = predictions.iloc[:max_samples].copy()
+
+    gradcam_dir = output_dir / "gradcam_npy"
+    lrp_dir = output_dir / "lrp_npy"
+    missing_gradcam = []
+    missing_lrp = []
+    for filename in predictions["filename"]:
+        name = Path(str(filename)).name
+        if not (gradcam_dir / name).is_file():
+            missing_gradcam.append(name)
+        if not (lrp_dir / name).is_file():
+            missing_lrp.append(name)
+
+    if missing_gradcam or missing_lrp:
+        raise FileNotFoundError(
+            "Cached inference is incomplete: "
+            f"missing Grad-CAM={len(missing_gradcam)}, "
+            f"missing LRP={len(missing_lrp)}. "
+            "Use --force-inference to regenerate all inference artifacts."
+        )
+    return predictions
+
+
 def evaluate_and_explain(
-    model_list: list[nn.Module], loader: DataLoader, device: torch.device,
-    output_dir: Path, dpi: int, classification_threshold: float
+    model_list: list[nn.Module],
+    loader: DataLoader,
+    device: torch.device,
+    output_dir: Path,
+    dpi: int,
+    classification_threshold: float,
 ) -> tuple[pd.DataFrame, dict[str, float], torch.Tensor]:
     dataset = loader.dataset
     gradcam_dir = output_dir / "gradcam_npy"
@@ -399,7 +630,9 @@ def evaluate_and_explain(
     visualization_dir = output_dir / "visualization"
     for directory in (gradcam_dir, lrp_dir, visualization_dir):
         directory.mkdir(parents=True, exist_ok=True)
-    confusion = torch.zeros((len(dataset.classes), len(dataset.classes)), dtype=torch.int64)
+    confusion = torch.zeros(
+        (len(dataset.classes), len(dataset.classes)), dtype=torch.int64
+    )
     criterion = nn.CrossEntropyLoss(reduction="sum")
     records, targets_all, probabilities_all = [], [], []
     total_loss, sample_index = 0.0, 0
@@ -409,7 +642,9 @@ def evaluate_and_explain(
             inputs = inputs.to(device, non_blocking=True)
             labels = labels.to(device, non_blocking=True)
             with torch.no_grad():
-                fold_probabilities = [torch.softmax(model(inputs), dim=1) for model in model_list]
+                fold_probabilities = [
+                    torch.softmax(model(inputs), dim=1) for model in model_list
+                ]
                 probabilities = torch.stack(fold_probabilities).mean(dim=0)
             predictions = binary_probabilities_to_predictions(
                 probabilities,
@@ -417,29 +652,51 @@ def evaluate_and_explain(
                 dataset.class_to_idx["malignant"],
             )
             total_loss += float(criterion(probabilities.clamp_min(1e-12).log(), labels))
-            confusion = update_confusion_matrix(confusion, predictions, labels, len(dataset.classes))
+            confusion = update_confusion_matrix(
+                confusion, predictions, labels, len(dataset.classes)
+            )
             targets_all.append(labels.cpu())
             probabilities_all.append(probabilities.cpu())
             gradcam_maps = normalize_unsigned(
-                torch.stack([cam.generate(inputs.detach().clone(), predictions) for cam in cameras]).mean(0)
+                torch.stack(
+                    [
+                        cam.generate(inputs.detach().clone(), predictions)
+                        for cam in cameras
+                    ]
+                ).mean(0)
             ).cpu()
             lrp_maps = normalize_signed(
-                torch.stack([generate_lrp(model, inputs, predictions) for model in model_list]).mean(0)
+                torch.stack(
+                    [generate_lrp(model, inputs, predictions) for model in model_list]
+                ).mean(0)
             ).cpu()
             for batch_index in range(len(inputs)):
                 row = dataset.metadata.iloc[sample_index]
                 filename = Path(str(row["filename"])).name
                 prediction = int(predictions[batch_index])
-                np.save(gradcam_dir / filename, gradcam_maps[batch_index].numpy().astype(np.float32))
-                np.save(lrp_dir / filename, lrp_maps[batch_index].numpy().astype(np.float32))
+                np.save(
+                    gradcam_dir / filename,
+                    gradcam_maps[batch_index].numpy().astype(np.float32),
+                )
+                np.save(
+                    lrp_dir / filename, lrp_maps[batch_index].numpy().astype(np.float32)
+                )
                 record = dict(row)
-                record.update({
-                    "true_index": int(labels[batch_index]),
-                    "predicted_index": prediction,
-                    "predicted_class": dataset.classes[prediction],
-                    "probability_benign": float(probabilities[batch_index, dataset.class_to_idx["benign"]]),
-                    "probability_malignant": float(probabilities[batch_index, dataset.class_to_idx["malignant"]]),
-                })
+                record.update(
+                    {
+                        "true_index": int(labels[batch_index]),
+                        "predicted_index": prediction,
+                        "predicted_class": dataset.classes[prediction],
+                        "probability_benign": float(
+                            probabilities[batch_index, dataset.class_to_idx["benign"]]
+                        ),
+                        "probability_malignant": float(
+                            probabilities[
+                                batch_index, dataset.class_to_idx["malignant"]
+                            ]
+                        ),
+                    }
+                )
                 records.append(record)
                 sample_index += 1
     finally:
@@ -451,19 +708,75 @@ def evaluate_and_explain(
     metrics["loss"] = total_loss / len(dataset)
     metrics["auc"] = compute_auc(targets.numpy(), probabilities.numpy())
     predictions_frame = pd.DataFrame(records)
-    save_visualizations(predictions_frame, dataset, gradcam_dir, lrp_dir, visualization_dir, dpi)
+    save_visualizations(
+        predictions_frame, dataset, gradcam_dir, lrp_dir, visualization_dir, dpi
+    )
     return predictions_frame, metrics, confusion
 
 
 def main() -> None:
     args = parse_args()
     if args.batch_size <= 0 or args.num_workers < 0 or args.dpi <= 0:
-        raise ValueError("Batch size and DPI must be positive; workers cannot be negative.")
+        raise ValueError(
+            "Batch size and DPI must be positive; workers cannot be negative."
+        )
+
     result_dir = resolve_path(args.result_dir)
+    if not result_dir.is_dir():
+        raise FileNotFoundError(f"Result directory not found: {result_dir}")
+
     output_dir = result_dir / "test"
-    config = relocate_dataset_paths(load_fold_config(result_dir))
+    config = relocate_dataset_paths(
+        config=load_fold_config(result_dir),
+        dataset_root_override=args.dataset_root,
+        metadata_path_override=args.metadata_path,
+    )
+    loader = build_test_loader(
+        config=config,
+        batch_size=args.batch_size,
+        num_workers=args.num_workers,
+        max_samples=args.max_samples,
+    )
+    cached_predictions = None
+    if not args.force_inference:
+        cached_predictions = load_cached_predictions(
+            output_dir=output_dir,
+            max_samples=args.max_samples,
+            ct_path_column=str(config["data"]["ct_path_column"]),
+        )
+
+    print("Local ResNet-50 baseline test")
+    print(f"Result directory : {result_dir}")
+    print(f"Dataset root     : {config['data']['dataset_root']}")
+    print(f"Metadata         : {config['data']['metadata_path']}")
+    print(f"CT path column   : {config['data']['ct_path_column']}")
+    print(f"Test samples     : {len(loader.dataset):,}")
+    print(f"Output directory : {output_dir}")
+
+    if cached_predictions is not None:
+        gradcam_dir = output_dir / "gradcam_npy"
+        lrp_dir = output_dir / "lrp_npy"
+        visualization_dir = output_dir / "visualization"
+        print("Mode             : visualization only (cached inference)")
+        print("Model inference  : skipped")
+        print()
+        save_visualizations(
+            predictions=cached_predictions,
+            dataset=loader.dataset,
+            gradcam_dir=gradcam_dir,
+            lrp_dir=lrp_dir,
+            visualization_dir=visualization_dir,
+            dpi=args.dpi,
+        )
+        print(f"Visualized samples: {len(cached_predictions):,} from cached maps")
+        print(f"Visualizations   : {visualization_dir}")
+        return
+
     device = select_device(args.device)
-    loader = build_test_loader(config, args.batch_size, args.num_workers, args.max_samples)
+    print("Mode             : inference and visualization")
+    print(f"Device           : {device}")
+    print()
+
     model_list = load_models(result_dir, config, device)
     started = time.perf_counter()
     predictions, metrics, confusion = evaluate_and_explain(
@@ -478,7 +791,9 @@ def main() -> None:
     predictions.to_csv(output_dir / "test_predictions.csv", index=False)
     plot_confusion_matrix(confusion, loader.dataset.classes, output_dir)
     targets = predictions["true_index"].to_numpy()
-    probabilities = predictions[["probability_benign", "probability_malignant"]].to_numpy()
+    probabilities = predictions[
+        ["probability_benign", "probability_malignant"]
+    ].to_numpy()
     plot_roc_curve(targets, probabilities, loader.dataset.classes, output_dir)
     results = {
         "evaluated_at": datetime.now().isoformat(timespec="seconds"),
@@ -494,8 +809,13 @@ def main() -> None:
         "xai": {
             "gradcam_target": "layer4[-1]",
             "lrp_rule": "EpsilonPlusFlat with ResNetCanonizer",
-            "visualization_grouping": "one PNG per study with one section per nodule",
-            "panels": ["full CT scan", "ground-truth nodule mask", "Grad-CAM overlay", "LRP overlay"],
+            "visualization_grouping": ("one PNG per study with one section per nodule"),
+            "panels": [
+                "full CT scan",
+                "ground-truth nodule mask",
+                "Grad-CAM overlay",
+                "LRP overlay",
+            ],
         },
     }
     with (output_dir / "test_results.json").open("w", encoding="utf-8") as file:

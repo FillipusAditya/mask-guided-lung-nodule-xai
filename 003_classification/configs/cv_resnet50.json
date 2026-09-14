@@ -1,7 +1,7 @@
 {
     "experiment": {
         "id": "a0d90f9e-3dd4-4de0-98af-12858696f613",
-        "component": "classification/cv_resnet50"
+        "component": "classification/baseline_resnet50"
     },
     "output": {
         "root_directory": "experiment_results",
@@ -17,8 +17,16 @@
             "benign": 0,
             "malignant": 1
         },
-        "normalization_mean": [0.485, 0.456, 0.406],
-        "normalization_std": [0.229, 0.224, 0.225]
+        "normalization_mean": [
+            0.485,
+            0.456,
+            0.406
+        ],
+        "normalization_std": [
+            0.229,
+            0.224,
+            0.225
+        ]
     },
     "cross_validation": {
         "num_folds": 5,
@@ -66,7 +74,7 @@
         "enabled": true,
         "monitor": "val_loss",
         "mode": "min",
-        "patience": 20,
+        "patience": 5,
         "min_delta": 0.0,
         "verbose": true,
         "restore_best_weights": true
