@@ -1,6 +1,6 @@
 {
     "experiment": {
-        "id": "dc730a13-5813-4d87-b15c-3b630deb32b5",
+        "id": "a0d90f9e-3dd4-4de0-98af-12858696f613",
         "component": "classification/guided_resnet50"
     },
     "output": {
@@ -8,11 +8,11 @@
         "config_snapshot_filename": "segmentation_guided_cv_resnet50.json"
     },
     "data": {
-        "dataset_root": "000_dataset/_segmentation_dataset_v2",
-        "metadata_path": "000_dataset/_segmentation_dataset_v2/004_classification_cv_5fold_seed42.csv",
-        "ct_input_type": "windowed",
-        "ct_path_column": "ct_windowed_path",
-        "probability_root": "experiment_results/dc730a13-5813-4d87-b15c-3b630deb32b5/segmentation/unet/inference/probability_npy",
+        "dataset_root": "000_dataset_v2/_segmentation_dataset",
+        "metadata_path": "000_dataset_v2/_segmentation_dataset/004_classification_cv_5fold_seed42.csv",
+        "ct_input_type": "parenchyma",
+        "ct_path_column": "ct_parenchyma_path",
+        "probability_root": "experiment_results/a0d90f9e-3dd4-4de0-98af-12858696f613/segmentation/unet/inference/probability_npy",
         "input_height": 224,
         "input_width": 224,
         "class_to_idx": {
@@ -67,8 +67,8 @@
         "nesterov": false
     },
     "dataloader": {
-        "num_workers": 0,
-        "persistent_workers": false,
+        "num_workers": 2,
+        "persistent_workers": true,
         "prefetch_factor": 2,
         "pin_memory": true,
         "train_shuffle": true,
@@ -84,6 +84,9 @@
         "min_delta": 0.0,
         "verbose": true,
         "restore_best_weights": true
+    },
+    "amp": {
+        "training_enabled": false
     },
     "checkpoint": {
         "save_latest": true
