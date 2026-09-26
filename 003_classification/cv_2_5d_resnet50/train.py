@@ -95,6 +95,23 @@ def validate_configuration(config: dict[str, Any]) -> None:
         raise ValueError("data.slice_offsets must be [-1, 0, 1].")
     if str(config["optimizer"]["name"]).upper() != "SGD":
         raise ValueError("Only the SGD optimizer is supported.")
+    scheduler = config["scheduler"]
+    if scheduler["name"] != "ReduceLROnPlateau":
+        raise ValueError("Only the ReduceLROnPlateau scheduler is supported.")
+    if scheduler["mode"] != "min":
+        raise ValueError("The scheduler must minimize validation loss.")
+    if not 0.0 < float(scheduler["factor"]) < 1.0:
+        raise ValueError("scheduler.factor must be between zero and one.")
+    if int(scheduler["patience"]) < 0:
+        raise ValueError("scheduler.patience cannot be negative.")
+    if int(scheduler["max_reductions"]) < 0:
+        raise ValueError("scheduler.max_reductions cannot be negative.")
+    if float(scheduler["min_lr"]) < 0.0:
+        raise ValueError("scheduler.min_lr cannot be negative.")
+    if bool(scheduler["enabled"]) and float(scheduler["min_lr"]) >= float(
+        config["training"]["learning_rate"]
+    ):
+        raise ValueError("scheduler.min_lr must be lower than the initial learning rate.")
     if config["aggregation"]["nodule_method"] != "mean_probability":
         raise ValueError("Only mean_probability nodule aggregation is supported.")
     if config["xai"]["gradcam_layer"] != "layer4[-1]":
@@ -194,6 +211,24 @@ def make_fold_loaders(config: dict, fold: int) -> tuple[DataLoader, DataLoader]:
     return make_loader(train_dataset, config, True), make_loader(val_dataset, config, False)
 
 
+def build_scheduler(optimizer: torch.optim.Optimizer, config: dict):
+    """Create one conservative validation-loss scheduler when enabled."""
+
+    scheduler_config = config["scheduler"]
+    if not bool(scheduler_config["enabled"]):
+        return None
+    return torch.optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer,
+        mode=str(scheduler_config["mode"]),
+        factor=float(scheduler_config["factor"]),
+        patience=int(scheduler_config["patience"]),
+        threshold=float(scheduler_config["threshold"]),
+        threshold_mode=str(scheduler_config["threshold_mode"]),
+        cooldown=int(scheduler_config["cooldown"]),
+        min_lr=float(scheduler_config["min_lr"]),
+    )
+
+
 def metrics_from_probabilities(
     targets: torch.Tensor, probabilities: torch.Tensor, threshold: float
 ) -> tuple[dict[str, float], torch.Tensor, torch.Tensor]:
@@ -213,6 +248,7 @@ def run_epoch(
     device: torch.device,
     threshold: float,
     optimizer: torch.optim.Optimizer | None = None,
+    description: str = "Epoch",
 ) -> tuple[float, dict[str, float], torch.Tensor, torch.Tensor, torch.Tensor]:
     training = optimizer is not None
     model.train(training)
@@ -220,7 +256,13 @@ def run_epoch(
     targets_all, probabilities_all, indices_all = [], [], []
     context = torch.enable_grad if training else torch.no_grad
     with context():
-        for inputs, targets, indices in tqdm(loader, leave=False, unit="batch"):
+        for inputs, targets, indices in tqdm(
+            loader,
+            desc=description,
+            leave=False,
+            unit="batch",
+            dynamic_ncols=True,
+        ):
             inputs, targets = inputs.to(device), targets.to(device)
             if training:
                 optimizer.zero_grad(set_to_none=True)
@@ -341,6 +383,9 @@ def run_fold(config: dict, fold: int, output_dir: Path, device: torch.device):
         weight_decay=float(optimizer_config["weight_decay"]),
         nesterov=bool(optimizer_config["nesterov"]),
     )
+    scheduler = build_scheduler(optimizer, config)
+    maximum_lr_reductions = int(config["scheduler"]["max_reductions"])
+    lr_reduction_count = 0
     criterion = nn.CrossEntropyLoss()
     stop_config = config["early_stopping"]
     stopper = EarlyStopping(
@@ -359,16 +404,28 @@ def run_fold(config: dict, fold: int, output_dir: Path, device: torch.device):
     for epoch in range(1, int(config["training"]["num_epochs"]) + 1):
         epoch_started = time.perf_counter()
         train_loss, train_metrics, *_ = run_epoch(
-            model, train_loader, criterion, device, threshold, optimizer
+            model,
+            train_loader,
+            criterion,
+            device,
+            threshold,
+            optimizer,
+            description=f"Fold {fold + 1} epoch {epoch} train",
         )
         val_loss, val_metrics, targets, probabilities, indices = run_epoch(
-            model, val_loader, criterion, device, threshold
+            model,
+            val_loader,
+            criterion,
+            device,
+            threshold,
+            description=f"Fold {fold + 1} epoch {epoch} validation",
         )
         frame = build_prediction_frame(
             val_loader.dataset, indices, targets, probabilities, threshold, fold
         )
         nodules, node_metrics, node_confusion = nodule_metrics(frame, config)
         _, window_confusion, _ = metrics_from_probabilities(targets, probabilities, threshold)
+        learning_rate = float(optimizer.param_groups[0]["lr"])
         is_best = val_loss < best_loss - float(stop_config["min_delta"])
         if is_best:
             best_loss = val_loss
@@ -377,17 +434,36 @@ def run_fold(config: dict, fold: int, output_dir: Path, device: torch.device):
             best_window_metrics, best_nodule_metrics = val_metrics, node_metrics
             best_window_confusion, best_nodule_confusion = window_confusion, node_confusion
         should_stop = stopper(val_loss, epoch)
+        if scheduler is not None and lr_reduction_count < maximum_lr_reductions:
+            scheduler.step(val_loss)
+        next_learning_rate = float(optimizer.param_groups[0]["lr"])
+        lr_reduced = next_learning_rate < learning_rate - 1e-15
+        if lr_reduced:
+            lr_reduction_count += 1
+            print(
+                f"Learning rate reduced: {learning_rate:.3g} -> "
+                f"{next_learning_rate:.3g} "
+                f"({lr_reduction_count}/{maximum_lr_reductions})"
+            )
         torch.save(
             {
                 "epoch": epoch, "model_state_dict": model.state_dict(),
                 "optimizer_state_dict": optimizer.state_dict(),
+                "scheduler_state_dict": (
+                    scheduler.state_dict() if scheduler is not None else None
+                ),
+                "lr_reduction_count": lr_reduction_count,
                 "early_stopping_state_dict": stopper.state_dict(), "val_loss": val_loss,
             },
             fold_dir / "checkpoint_latest.pth",
         )
         row = {
             "epoch": epoch, "epoch_time_seconds": time.perf_counter() - epoch_started,
-            "learning_rate": optimizer.param_groups[0]["lr"], "train_loss": train_loss,
+            "learning_rate": learning_rate,
+            "next_learning_rate": next_learning_rate,
+            "lr_reduced": lr_reduced,
+            "lr_reduction_count": lr_reduction_count,
+            "train_loss": train_loss,
             "train_accuracy": train_metrics["accuracy"], "val_loss": val_loss,
             "val_accuracy": val_metrics["accuracy"], "val_sensitivity": val_metrics["sensitivity"],
             "val_specificity": val_metrics["specificity"], "val_precision": val_metrics["precision"],
@@ -399,7 +475,8 @@ def run_fold(config: dict, fold: int, output_dir: Path, device: torch.device):
         pd.DataFrame(log_rows).to_csv(fold_dir / "training_log.csv", index=False)
         print(
             f"Epoch {epoch:03d} train_loss={train_loss:.4f} val_loss={val_loss:.4f} "
-            f"window_auc={val_metrics['auc']:.4f} nodule_auc={node_metrics['auc']:.4f}"
+            f"window_auc={val_metrics['auc']:.4f} nodule_auc={node_metrics['auc']:.4f} "
+            f"lr={learning_rate:.3g}"
         )
         if should_stop:
             break
@@ -433,6 +510,8 @@ def run_fold(config: dict, fold: int, output_dir: Path, device: torch.device):
     summary = {
         "fold": fold, "best_epoch": stopper.best_epoch, "epochs_completed": len(log_rows),
         "best_val_loss": best_loss, "training_seconds": time.perf_counter() - started,
+        "lr_reductions": lr_reduction_count,
+        "final_learning_rate": float(optimizer.param_groups[0]["lr"]),
         **{f"window_{key}": value for key, value in best_window_metrics.items()},
         **{f"nodule_{key}": value for key, value in best_nodule_metrics.items()},
     }

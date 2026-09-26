@@ -31,6 +31,12 @@ are selected using validation loss. Both window-level and nodule-level metrics
 are recorded; nodule probabilities are the arithmetic mean of all window
 probabilities belonging to that nodule.
 
+The default learning-rate policy is deliberately small and bounded. Training
+starts at `1e-3`; `ReduceLROnPlateau` may reduce it once to `1e-4` after three
+non-improving validation-loss epochs. No further reductions are allowed, and
+early stopping uses a patience of ten epochs. The training log records the LR
+used by each epoch, the next LR, and whether a reduction occurred.
+
 ## Holdout test
 
 ```bash
@@ -88,4 +94,3 @@ cv_2_5d_resnet50/
 The English Google Colab workflow is available in
 `cv_2_5d_resnet50_colab.ipynb`. Its parameter cell exposes every configuration,
 training, testing, and XAI option in one place.
-
