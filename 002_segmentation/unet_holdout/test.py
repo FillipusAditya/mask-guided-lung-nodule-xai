@@ -20,7 +20,9 @@ from pathlib import Path
 from typing import Any
 
 os.environ.setdefault("NO_ALBUMENTATIONS_UPDATE", "1")
-os.environ.setdefault("MPLCONFIGDIR", str(Path(tempfile.gettempdir()) / "unet_matplotlib"))
+os.environ.setdefault(
+    "MPLCONFIGDIR", str(Path(tempfile.gettempdir()) / "unet_matplotlib")
+)
 warnings.filterwarnings("ignore")
 
 import albumentations as A
@@ -35,7 +37,6 @@ import torch
 from torch.utils.data import DataLoader, Subset
 from tqdm import tqdm
 
-
 SEGMENTATION_ROOT = Path(__file__).resolve().parents[1]
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(SEGMENTATION_ROOT))
@@ -48,7 +49,6 @@ from unet_utils import (  # noqa: E402
     update_confusion_matrix,
 )
 from unet_utils.dataset import LungDataset  # noqa: E402
-
 
 METRIC_NAMES = ("dice", "iou", "precision", "sensitivity", "specificity")
 METRIC_LABELS = {
@@ -223,6 +223,7 @@ def create_split_data(
         fold=data_config.get("fold"),
         image_path_column=str(data_config["image_path_column"]),
         tile_grid_size=int(data_config["tile_grid_size"]),
+        tile_overlap=int(data_config.get("tile_overlap", 0)),
         transform=transform,
     )
 
@@ -239,7 +240,11 @@ def create_split_data(
         for filename in ordered_metadata["filename"]
     ]
     ordered_metadata["_slice_sort"] = [
-        int(match.group(1)) if (match := re.search(r"_slice_(\d+)", str(filename))) else -1
+        (
+            int(match.group(1))
+            if (match := re.search(r"_slice_(\d+)", str(filename)))
+            else -1
+        )
         for filename in ordered_metadata["filename"]
     ]
     dataset.metadata = (
@@ -274,7 +279,9 @@ def create_split_data(
         num_workers=workers,
         pin_memory=torch.cuda.is_available(),
         persistent_workers=(
-            bool(loader_config.get("persistent_workers", True)) if workers > 0 else False
+            bool(loader_config.get("persistent_workers", True))
+            if workers > 0
+            else False
         ),
         prefetch_factor=(
             int(loader_config.get("prefetch_factor", 2)) if workers > 0 else None
@@ -450,7 +457,11 @@ def save_study_canvas(
         va="bottom",
         fontsize=10.5,
         color="#303440",
-        bbox={"boxstyle": "round,pad=0.45", "facecolor": "white", "edgecolor": "#d7dae3"},
+        bbox={
+            "boxstyle": "round,pad=0.45",
+            "facecolor": "white",
+            "edgecolor": "#d7dae3",
+        },
     )
     figure.subplots_adjust(
         left=0.015,
@@ -460,7 +471,9 @@ def save_study_canvas(
         hspace=0.10,
         wspace=0.035,
     )
-    figure.savefig(save_path, dpi=dpi, bbox_inches="tight", facecolor=figure.get_facecolor())
+    figure.savefig(
+        save_path, dpi=dpi, bbox_inches="tight", facecolor=figure.get_facecolor()
+    )
     plt.close(figure)
 
 
@@ -607,7 +620,11 @@ def save_probability_study_canvas(
         va="bottom",
         fontsize=10.5,
         color="#303440",
-        bbox={"boxstyle": "round,pad=0.45", "facecolor": "white", "edgecolor": "#d7dae3"},
+        bbox={
+            "boxstyle": "round,pad=0.45",
+            "facecolor": "white",
+            "edgecolor": "#d7dae3",
+        },
     )
     figure.subplots_adjust(
         left=0.015,
@@ -844,7 +861,11 @@ def save_sectioned_study_canvas(
         va="bottom",
         fontsize=10,
         color="#303440",
-        bbox={"boxstyle": "round,pad=0.45", "facecolor": "white", "edgecolor": "#d7dae3"},
+        bbox={
+            "boxstyle": "round,pad=0.45",
+            "facecolor": "white",
+            "edgecolor": "#d7dae3",
+        },
     )
 
     max_dimension_dpi = int(65_000 / figure_height)
@@ -854,10 +875,15 @@ def save_sectioned_study_canvas(
     plt.close(figure)
 
 
-def aggregate_metrics(records: list[dict[str, Any]]) -> tuple[dict[str, float], list[dict[str, Any]]]:
+def aggregate_metrics(
+    records: list[dict[str, Any]],
+) -> tuple[dict[str, float], list[dict[str, Any]]]:
     """Calculate micro-averaged overall and per-class segmentation metrics."""
 
-    totals = {name: sum(int(record[name]) for record in records) for name in ("tp", "fp", "tn", "fn")}
+    totals = {
+        name: sum(int(record[name]) for record in records)
+        for name in ("tp", "fp", "tn", "fn")
+    }
     overall = compute_segmentation_metrics(
         totals["tp"], totals["fp"], totals["tn"], totals["fn"]
     )
@@ -881,7 +907,12 @@ def aggregate_metrics(records: list[dict[str, Any]]) -> tuple[dict[str, float], 
             class_totals["fn"],
         )
         per_class.append(
-            {"class": class_name, "samples": len(class_records), **values, **class_totals}
+            {
+                "class": class_name,
+                "samples": len(class_records),
+                **values,
+                **class_totals,
+            }
         )
     return overall, per_class
 
@@ -916,7 +947,9 @@ def save_metrics_plot(
     x = np.arange(len(METRIC_NAMES))
     labels = [METRIC_LABELS[name] for name in METRIC_NAMES]
 
-    bars = axes[0].bar(x, [overall[name] for name in METRIC_NAMES], color=colors, width=0.7)
+    bars = axes[0].bar(
+        x, [overall[name] for name in METRIC_NAMES], color=colors, width=0.7
+    )
     add_bar_labels(axes[0], bars)
     axes[0].set_title("Overall Test Metrics (Micro)", weight="bold")
     axes[0].set_xticks(x, labels, rotation=20, ha="right")
@@ -937,7 +970,9 @@ def save_metrics_plot(
     axes[1].legend(frameon=False, fontsize=9)
 
     box_data = [per_scan[name].to_numpy(dtype=float) for name in METRIC_NAMES]
-    boxplot = axes[2].boxplot(box_data, patch_artist=True, tick_labels=labels, showfliers=False)
+    boxplot = axes[2].boxplot(
+        box_data, patch_artist=True, tick_labels=labels, showfliers=False
+    )
     for patch, color in zip(boxplot["boxes"], colors):
         patch.set_facecolor(color)
         patch.set_alpha(0.78)
@@ -961,7 +996,9 @@ def save_metrics_plot(
         color="#202431",
     )
     figure.tight_layout(rect=(0, 0, 1, 0.92), w_pad=2.0)
-    figure.savefig(save_path, dpi=dpi, bbox_inches="tight", facecolor=figure.get_facecolor())
+    figure.savefig(
+        save_path, dpi=dpi, bbox_inches="tight", facecolor=figure.get_facecolor()
+    )
     plt.close(figure)
 
 
@@ -972,6 +1009,9 @@ def run_inference(
     device: torch.device,
     threshold: float,
     tile_grid_size: int,
+    tile_overlap: int,
+    tile_blend_mode: str,
+    output_size: tuple[int, int],
     probability_npy_dir: Path,
     visualization_dir: Path,
     mask_dir: Path,
@@ -991,7 +1031,8 @@ def run_inference(
     current_study_slices: list[dict[str, Any]] = []
     running_loss = 0.0
     sample_index = 0
-    amp_enabled = device.type == "cuda"
+    # amp_enabled = device.type == "cuda"
+    amp_enabled = False
     study_count = len(
         {
             study_id_from_filename(str(row["filename"]), str(row["dataset"]))
@@ -1041,9 +1082,30 @@ def run_inference(
                     tile_logits = model(image_tiles)
                 logit_tiles.append(tile_logits.float().cpu())
 
-            logits = merge_tiles(torch.stack(logit_tiles, dim=1), grid_size=tile_grid_size)
-            full_images = merge_tiles(images, grid_size=tile_grid_size)
-            targets = (merge_tiles(masks, grid_size=tile_grid_size) > 0.5).float()
+            logits = merge_tiles(
+                torch.stack(logit_tiles, dim=1),
+                grid_size=tile_grid_size,
+                overlap=tile_overlap,
+                output_size=output_size,
+                blend_mode=tile_blend_mode,
+            )
+            full_images = merge_tiles(
+                images,
+                grid_size=tile_grid_size,
+                overlap=tile_overlap,
+                output_size=output_size,
+                blend_mode=tile_blend_mode,
+            )
+            targets = (
+                merge_tiles(
+                    masks,
+                    grid_size=tile_grid_size,
+                    overlap=tile_overlap,
+                    output_size=output_size,
+                    blend_mode=tile_blend_mode,
+                )
+                > 0.5
+            ).float()
             probabilities = torch.sigmoid(logits)
             predictions = (probabilities > threshold).float()
             batch_loss = criterion(logits, targets)
@@ -1098,7 +1160,9 @@ def run_inference(
                     probability_array,
                     allow_pickle=False,
                 )
-                prediction_array = prediction.squeeze().numpy().astype(np.uint8, copy=False)
+                prediction_array = (
+                    prediction.squeeze().numpy().astype(np.uint8, copy=False)
+                )
                 np.save(mask_dir / filename, prediction_array, allow_pickle=False)
 
                 # Retain every slice so each study canvas shows the complete set,
@@ -1138,7 +1202,12 @@ def run_inference(
     study_progress.close()
 
     overall, per_class = aggregate_metrics(records)
-    return pd.DataFrame.from_records(records), overall, per_class, running_loss / sample_index
+    return (
+        pd.DataFrame.from_records(records),
+        overall,
+        per_class,
+        running_loss / sample_index,
+    )
 
 
 def main() -> None:
@@ -1175,9 +1244,7 @@ def main() -> None:
 
     features = [
         int(feature)
-        for feature in config.get("model", {}).get(
-            "features", [16, 32, 64, 128]
-        )
+        for feature in config.get("model", {}).get("features", [16, 32, 64, 128])
     ]
     device = select_device(args.device)
     model = load_model(checkpoint_path, device, features)
@@ -1187,6 +1254,14 @@ def main() -> None:
     mask_root = output_dir / "mask"
 
     test_results = None
+    data_config = config["data"]
+    tile_grid_size = int(data_config["tile_grid_size"])
+    tile_overlap = int(data_config.get("tile_overlap", 0))
+    tile_blend_mode = str(data_config.get("tile_blend_mode", "uniform"))
+    output_size = (
+        int(data_config["input_height"]),
+        int(data_config["input_width"]),
+    )
     seen_probability_filenames: set[str] = set()
     for split in ("train", "val", "test"):
         loader, metadata = create_split_data(
@@ -1196,7 +1271,9 @@ def main() -> None:
             num_workers=args.num_workers,
             max_samples=args.max_samples,
         )
-        split_filenames = {Path(str(filename)).name for filename in metadata["filename"]}
+        split_filenames = {
+            Path(str(filename)).name for filename in metadata["filename"]
+        }
         duplicates = seen_probability_filenames & split_filenames
         if duplicates:
             duplicate = sorted(duplicates)[0]
@@ -1212,7 +1289,10 @@ def main() -> None:
             metadata=metadata,
             device=device,
             threshold=threshold,
-            tile_grid_size=int(config["data"]["tile_grid_size"]),
+            tile_grid_size=tile_grid_size,
+            tile_overlap=tile_overlap,
+            tile_blend_mode=tile_blend_mode,
+            output_size=output_size,
             probability_npy_dir=probability_npy_dir,
             visualization_dir=visualization_root / output_group,
             mask_dir=mask_root / output_group,

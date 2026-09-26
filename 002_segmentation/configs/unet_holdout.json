@@ -10,7 +10,9 @@
         "image_path_column": "ct_parenchyma_path",
         "input_height": 512,
         "input_width": 512,
-        "tile_grid_size": 4
+        "tile_grid_size": 5,
+        "tile_overlap": 32,
+        "tile_blend_mode": "hann"
     },
     "model": {
         "features": [16, 32, 64, 128]
@@ -23,8 +25,9 @@
         "seed": 42,
         "prediction_threshold": 0.5,
         "parallel_tile_processing": true,
-        "tile_chunk_size": null,
+        "tile_chunk_size": 16,
         "activation_checkpointing": false,
+        "gradient_clip_max_norm": 1.0,
         "validation_on_gpu": true,
         "non_blocking_transfer": true
     },
@@ -37,11 +40,18 @@
     },
     "scheduler": {
         "enabled": true,
-        "name": "ReduceLROnPlateau",
-        "factor": 0.5,
+        "name": "DiscreteReduceLROnPlateau",
+        "learning_rates": [
+            1e-3,
+            5e-4,
+            1e-4,
+            5e-5,
+            1e-5,
+            5e-6,
+            1e-6
+        ],
         "patience": 2,
-        "threshold": 0.0001,
-        "min_lr": 1e-6
+        "threshold": 0.0001
     },
     "dataloader": {
         "num_workers": 6,

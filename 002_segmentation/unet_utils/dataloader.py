@@ -15,6 +15,7 @@ def create_dataloader(
     fold: int | None = None,
     image_path_column: str = "ct_parenchyma_path",
     tile_grid_size: int = 4,
+    tile_overlap: int = 0,
     shuffle: bool = False,
     num_workers: int = 4,
     pin_memory: bool = True,
@@ -46,6 +47,8 @@ def create_dataloader(
         Metadata column containing relative CT image paths.
     tile_grid_size : int, default=4
         Number of tile rows and columns used to divide each sample.
+    tile_overlap : int, default=0
+        Number of pixels shared by horizontally and vertically adjacent tiles.
     shuffle : bool, default=False
         Whether to shuffle samples each epoch.
     num_workers : int, default=4
@@ -73,6 +76,7 @@ def create_dataloader(
         fold=fold,
         image_path_column=image_path_column,
         tile_grid_size=tile_grid_size,
+        tile_overlap=tile_overlap,
         transform=transform,
     )
 

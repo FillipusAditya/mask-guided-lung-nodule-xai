@@ -18,6 +18,38 @@ def _check_finite(tensor: torch.Tensor, name: str, context: str) -> None:
         raise FloatingPointError(f"Non-finite {name} detected in {context}.")
 
 
+def _clip_and_validate_gradients(
+    model: torch.nn.Module,
+    max_norm: float | None,
+    context: str,
+) -> torch.Tensor:
+    """Validate all gradients and optionally clip their global L2 norm."""
+
+    if max_norm is not None and max_norm <= 0:
+        raise ValueError("gradient_clip_max_norm must be positive or None.")
+
+    parameters = [
+        parameter for parameter in model.parameters() if parameter.grad is not None
+    ]
+    if not parameters:
+        raise RuntimeError(f"No gradients were produced in {context}.")
+
+    clipping_limit = float("inf") if max_norm is None else float(max_norm)
+    try:
+        gradient_norm = torch.nn.utils.clip_grad_norm_(
+            parameters,
+            max_norm=clipping_limit,
+            norm_type=2.0,
+            error_if_nonfinite=True,
+        )
+    except RuntimeError as error:
+        raise FloatingPointError(
+            f"Non-finite gradient norm detected in {context}."
+        ) from error
+
+    return gradient_norm
+
+
 def _confusion_matrix_counts(
     predictions: torch.Tensor, targets: torch.Tensor
 ) -> torch.Tensor:
@@ -120,9 +152,13 @@ def train_one_epoch(
     scaler: torch.amp.GradScaler,
     amp_enabled: bool,
     tile_grid_size: int = 4,
+    tile_overlap: int = 0,
+    tile_blend_mode: str = "uniform",
+    output_size: tuple[int, int] | None = None,
     parallel_tile_processing: bool = False,
     tile_chunk_size: int | None = None,
     activation_checkpointing: bool = True,
+    gradient_clip_max_norm: float | None = None,
     non_blocking_transfer: bool = False,
 ) -> float:
     """
@@ -155,6 +191,12 @@ def train_one_epoch(
         Whether automatic mixed precision is enabled.
     tile_grid_size : int, default=4
         Number of tile rows and columns used to reconstruct each image.
+    tile_overlap : int, default=0
+        Number of pixels shared by adjacent tiles.
+    tile_blend_mode : str, default="uniform"
+        Weighting method used to combine overlapping tile logits.
+    output_size : tuple[int, int], optional
+        Original full-image height and width used to remove tiling padding.
     parallel_tile_processing : bool, default=False
         Whether to combine the image and tile dimensions for parallel forward.
     tile_chunk_size : int, optional
@@ -162,6 +204,9 @@ def train_one_epoch(
         all flattened tiles are processed together.
     activation_checkpointing : bool, default=True
         Whether to trade additional computation for lower activation memory.
+    gradient_clip_max_norm : float, optional
+        Maximum global L2 gradient norm. If ``None``, gradients are checked
+        for finite values without clipping.
     non_blocking_transfer : bool, default=False
         Whether host-to-device tensor transfers may run asynchronously.
 
@@ -212,8 +257,18 @@ def train_one_epoch(
         predictions = merge_tiles(
             prediction_tiles,
             grid_size=tile_grid_size,
+            overlap=tile_overlap,
+            output_size=output_size,
+            blend_mode=tile_blend_mode,
         )
-        targets = merge_tiles(masks, grid_size=tile_grid_size)
+        targets = merge_tiles(
+            masks,
+            grid_size=tile_grid_size,
+            overlap=tile_overlap,
+            output_size=output_size,
+            blend_mode=tile_blend_mode,
+        )
+        targets = (targets > 0.5).to(dtype=predictions.dtype)
         context = f"training epoch {epoch + 1}, batch {batch_index + 1}"
         _check_finite(predictions, "full-image predictions", context)
 
@@ -221,6 +276,14 @@ def train_one_epoch(
         _check_finite(batch_loss, "full-image loss", context)
 
         scaler.scale(batch_loss).backward()
+        # Gradients must be unscaled before their norm is checked or clipped.
+        # With AMP disabled, GradScaler performs this as a no-op.
+        scaler.unscale_(optimizer)
+        gradient_norm = _clip_and_validate_gradients(
+            model=model,
+            max_norm=gradient_clip_max_norm,
+            context=context,
+        )
         scaler.step(optimizer)
         scaler.update()
 
@@ -229,7 +292,10 @@ def train_one_epoch(
         total_samples += batch_size
 
         # Update the progress bar
-        progress_bar.set_postfix(train_loss=f"{running_loss / total_samples:.4f}")
+        progress_bar.set_postfix(
+            train_loss=f"{running_loss / total_samples:.4f}",
+            grad_norm=f"{gradient_norm.item():.4f}",
+        )
 
     # Compute training metrics
     train_loss = running_loss / total_samples
@@ -246,6 +312,9 @@ def validate_one_epoch(
     device: str,
     threshold: float = 0.5,
     tile_grid_size: int = 4,
+    tile_overlap: int = 0,
+    tile_blend_mode: str = "uniform",
+    output_size: tuple[int, int] | None = None,
     amp_enabled: bool = False,
     parallel_tile_processing: bool = False,
     tile_chunk_size: int | None = None,
@@ -279,6 +348,12 @@ def validate_one_epoch(
         segmentation masks.
     tile_grid_size : int, default=4
         Number of tile rows and columns used to reconstruct each image.
+    tile_overlap : int, default=0
+        Number of pixels shared by adjacent tiles.
+    tile_blend_mode : str, default="uniform"
+        Weighting method used to combine overlapping tile logits.
+    output_size : tuple[int, int], optional
+        Original full-image height and width used to remove tiling padding.
     amp_enabled : bool, default=False
         Whether automatic mixed precision is enabled for model forward.
     parallel_tile_processing : bool, default=False
@@ -350,8 +425,18 @@ def validate_one_epoch(
             logits = merge_tiles(
                 prediction_tiles,
                 grid_size=tile_grid_size,
+                overlap=tile_overlap,
+                output_size=output_size,
+                blend_mode=tile_blend_mode,
             )
-            targets = merge_tiles(masks, grid_size=tile_grid_size)
+            targets = merge_tiles(
+                masks,
+                grid_size=tile_grid_size,
+                overlap=tile_overlap,
+                output_size=output_size,
+                blend_mode=tile_blend_mode,
+            )
+            targets = (targets > 0.5).to(dtype=logits.dtype)
             context = f"validation epoch {epoch + 1}, batch {batch_index + 1}"
             _check_finite(logits, "full-image predictions", context)
 

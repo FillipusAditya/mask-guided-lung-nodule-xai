@@ -29,6 +29,7 @@ class LungDataset(Dataset):
         fold: int | None = None,
         image_path_column: str = "ct_parenchyma_path",
         tile_grid_size: int = 4,
+        tile_overlap: int = 0,
         transform=None,
     ) -> None:
         """
@@ -52,6 +53,8 @@ class LungDataset(Dataset):
             Metadata column containing relative CT image paths.
         tile_grid_size : int, default=4
             Number of tile rows and columns used to divide each sample.
+        tile_overlap : int, default=0
+            Number of pixels shared by horizontally and vertically adjacent tiles.
         transform : callable, optional
             Albumentations transform applied jointly to the CT and mask.
         """
@@ -60,6 +63,7 @@ class LungDataset(Dataset):
         self.transform = transform
         self.image_path_column = image_path_column
         self.tile_grid_size = tile_grid_size
+        self.tile_overlap = tile_overlap
 
         # Resolve and load the metadata CSV.
         metadata_path = Path(metadata_filename)
@@ -140,7 +144,15 @@ class LungDataset(Dataset):
             mask = mask.unsqueeze(0)
 
         # Divide the image and mask into spatially aligned tiles.
-        image = split_into_tiles(image, grid_size=self.tile_grid_size)
-        mask = split_into_tiles(mask, grid_size=self.tile_grid_size)
+        image = split_into_tiles(
+            image,
+            grid_size=self.tile_grid_size,
+            overlap=self.tile_overlap,
+        )
+        mask = split_into_tiles(
+            mask,
+            grid_size=self.tile_grid_size,
+            overlap=self.tile_overlap,
+        )
 
         return image, mask

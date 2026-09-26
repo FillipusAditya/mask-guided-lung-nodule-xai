@@ -11,7 +11,8 @@ from .logger import (
 from .loss import BCEDiceLoss, DiceLoss, IoULoss
 from .metrics import compute_segmentation_metrics, update_confusion_matrix
 from .seed import set_seed
-from .tiles import merge_tiles, split_into_tiles
+from .scheduler import DiscreteReduceLROnPlateau
+from .tiles import TileLayout, compute_tile_layout, merge_tiles, split_into_tiles
 from .visualization import plot_all_curves
 
 __all__ = [
@@ -30,6 +31,9 @@ __all__ = [
     "update_confusion_matrix",
     "compute_segmentation_metrics",
     "set_seed",
+    "DiscreteReduceLROnPlateau",
+    "TileLayout",
+    "compute_tile_layout",
     "split_into_tiles",
     "merge_tiles",
     "plot_all_curves",

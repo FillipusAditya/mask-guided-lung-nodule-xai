@@ -17,6 +17,7 @@ def save_checkpoint(
     scheduler: torch.optim.lr_scheduler.LRScheduler | None,
     loss_config: dict[str, object],
     scheduler_config: dict[str, object],
+    tiling_config: dict[str, object],
     epoch: int,
     best_val_loss: float,
     best_loss_epoch: int,
@@ -42,6 +43,8 @@ def save_checkpoint(
         Loss function configuration used by the experiment.
     scheduler_config : dict[str, object]
         Learning-rate scheduler configuration used by the experiment.
+    tiling_config : dict[str, object]
+        Full-image size, grid, overlap, and blending configuration.
     epoch : int
         Number of completed epochs.
     best_val_loss : float
@@ -69,6 +72,7 @@ def save_checkpoint(
         ),
         "loss_config": dict(loss_config),
         "scheduler_config": dict(scheduler_config),
+        "tiling_config": dict(tiling_config),
         "best_val_loss": best_val_loss,
         "best_loss_epoch": best_loss_epoch,
         "best_val_dice": best_val_dice,
@@ -119,6 +123,7 @@ def load_checkpoint(
     scheduler: torch.optim.lr_scheduler.LRScheduler | None,
     expected_loss_config: dict[str, object],
     expected_scheduler_config: dict[str, object],
+    expected_tiling_config: dict[str, object],
 ) -> tuple[int, float, int, float, int, int]:
     """
     Restore training state and return the saved training progress.
@@ -139,6 +144,8 @@ def load_checkpoint(
         Loss configuration required for the resumed experiment.
     expected_scheduler_config : dict[str, object]
         Scheduler configuration required for the resumed experiment.
+    expected_tiling_config : dict[str, object]
+        Tiling configuration required for the resumed experiment.
 
     Returns
     -------
@@ -181,6 +188,35 @@ def load_checkpoint(
             "Scheduler configuration mismatch when resuming training: "
             f"checkpoint uses {checkpoint_scheduler_config!r}, but the current "
             f"configuration uses {expected_scheduler_config!r}."
+        )
+
+    checkpoint_tiling_config = checkpoint.get("tiling_config")
+    if checkpoint_tiling_config is None:
+        # Checkpoints created before overlap support used non-overlapping tiles.
+        legacy_tiling_config = {
+            "input_height": 512,
+            "input_width": 512,
+            "grid_size": 4,
+            "overlap": 0,
+            "blend_mode": "uniform",
+        }
+        if expected_tiling_config != legacy_tiling_config:
+            raise ValueError(
+                "Tiling configuration mismatch when resuming training: the "
+                "checkpoint predates overlap support and therefore uses the "
+                f"legacy configuration {legacy_tiling_config!r}, "
+                f"but the current configuration uses {expected_tiling_config!r}."
+            )
+        warnings.warn(
+            "Checkpoint has no tiling configuration; treating it as a legacy "
+            "non-overlapping run.",
+            stacklevel=2,
+        )
+    elif checkpoint_tiling_config != expected_tiling_config:
+        raise ValueError(
+            "Tiling configuration mismatch when resuming training: "
+            f"checkpoint uses {checkpoint_tiling_config!r}, but the current "
+            f"configuration uses {expected_tiling_config!r}."
         )
 
     model.load_state_dict(checkpoint["model_state_dict"])

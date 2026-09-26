@@ -17,9 +17,11 @@ sys.path.insert(0, str(SEGMENTATION_ROOT))
 from unet_arch import UNET
 from unet_utils import (
     BCEDiceLoss,
+    DiscreteReduceLROnPlateau,
     DiceLoss,
     IoULoss,
     append_training_log,
+    compute_tile_layout,
     create_dataloader,
     create_training_log,
     load_checkpoint,
@@ -90,7 +92,22 @@ IMAGE_PATH_COLUMN = DATA_CONFIG["image_path_column"]
 INPUT_HEIGHT = DATA_CONFIG["input_height"]
 INPUT_WIDTH = DATA_CONFIG["input_width"]
 TILE_GRID_SIZE = DATA_CONFIG["tile_grid_size"]
+TILE_OVERLAP = int(DATA_CONFIG.get("tile_overlap", 0))
+TILE_BLEND_MODE = str(DATA_CONFIG.get("tile_blend_mode", "uniform"))
 MODEL_FEATURES = [int(feature) for feature in MODEL_CONFIG["features"]]
+
+TILE_LAYOUT = compute_tile_layout(
+    image_size=(INPUT_HEIGHT, INPUT_WIDTH),
+    grid_size=TILE_GRID_SIZE,
+    overlap=TILE_OVERLAP,
+)
+TILING_CONFIG = {
+    "input_height": INPUT_HEIGHT,
+    "input_width": INPUT_WIDTH,
+    "grid_size": TILE_GRID_SIZE,
+    "overlap": TILE_OVERLAP,
+    "blend_mode": TILE_BLEND_MODE,
+}
 
 TRAIN_SHUFFLE = DATALOADER_CONFIG["train_shuffle"]
 
@@ -114,6 +131,12 @@ PRED_THRESHOLD = TRAINING_CONFIG["prediction_threshold"]
 PARALLEL_TILE_PROCESSING = TRAINING_CONFIG.get("parallel_tile_processing", False)
 TILE_CHUNK_SIZE = TRAINING_CONFIG.get("tile_chunk_size")
 ACTIVATION_CHECKPOINTING = TRAINING_CONFIG.get("activation_checkpointing", True)
+gradient_clip_max_norm = TRAINING_CONFIG.get("gradient_clip_max_norm")
+GRADIENT_CLIP_MAX_NORM = (
+    float(gradient_clip_max_norm) if gradient_clip_max_norm is not None else None
+)
+if GRADIENT_CLIP_MAX_NORM is not None and GRADIENT_CLIP_MAX_NORM <= 0:
+    raise ValueError("gradient_clip_max_norm must be positive or null.")
 VALIDATION_ON_GPU = TRAINING_CONFIG.get("validation_on_gpu", False)
 NON_BLOCKING_TRANSFER = TRAINING_CONFIG.get("non_blocking_transfer", False)
 
@@ -187,10 +210,22 @@ def create_learning_rate_scheduler(optimizer: optim.Optimizer):
         return None
 
     scheduler_name = SCHEDULER_CONFIG["name"]
+    if scheduler_name == "DiscreteReduceLROnPlateau":
+        return DiscreteReduceLROnPlateau(
+            optimizer=optimizer,
+            learning_rates=[
+                float(rate) for rate in SCHEDULER_CONFIG["learning_rates"]
+            ],
+            mode="min",
+            patience=int(SCHEDULER_CONFIG["patience"]),
+            threshold=float(SCHEDULER_CONFIG["threshold"]),
+        )
+
     if scheduler_name != "ReduceLROnPlateau":
         raise ValueError(
             f"Unsupported learning-rate scheduler: {scheduler_name!r}. "
-            "Supported scheduler: ReduceLROnPlateau."
+            "Supported schedulers: ReduceLROnPlateau and "
+            "DiscreteReduceLROnPlateau."
         )
 
     return optim.lr_scheduler.ReduceLROnPlateau(
@@ -314,6 +349,7 @@ def main() -> None:
         fold=FOLD,
         image_path_column=IMAGE_PATH_COLUMN,
         tile_grid_size=TILE_GRID_SIZE,
+        tile_overlap=TILE_OVERLAP,
         shuffle=TRAIN_SHUFFLE,
         num_workers=NUM_WORKERS,
         pin_memory=PIN_MEMORY,
@@ -331,6 +367,7 @@ def main() -> None:
         fold=FOLD,
         image_path_column=IMAGE_PATH_COLUMN,
         tile_grid_size=TILE_GRID_SIZE,
+        tile_overlap=TILE_OVERLAP,
         num_workers=NUM_WORKERS,
         pin_memory=PIN_MEMORY,
         persistent_workers=PERSISTENT_WORKERS,
@@ -346,9 +383,17 @@ def main() -> None:
     print(f"Loss function: {LOSS_NAME}")
     print(f"Loss smooth: {LOSS_SMOOTH}")
     print(f"U-Net features: {MODEL_FEATURES}")
+    print(f"Tile grid: {TILE_GRID_SIZE}x{TILE_GRID_SIZE}")
+    print(f"Tile overlap: {TILE_OVERLAP} pixels")
+    print(
+        "Tile dimensions: "
+        f"{TILE_LAYOUT.tile_height}x{TILE_LAYOUT.tile_width} pixels"
+    )
+    print(f"Tile blend mode: {TILE_BLEND_MODE}")
     print(f"Parallel tile processing: {PARALLEL_TILE_PROCESSING}")
     print(f"Tile chunk size: {TILE_CHUNK_SIZE}")
     print(f"Activation checkpointing: {ACTIVATION_CHECKPOINTING}")
+    print(f"Gradient clip max norm: {GRADIENT_CLIP_MAX_NORM}")
     print(f"Validation on GPU: {VALIDATION_ON_GPU}")
     print(f"Non-blocking transfer: {NON_BLOCKING_TRANSFER}")
 
@@ -387,6 +432,7 @@ def main() -> None:
             scheduler=scheduler,
             expected_loss_config=LOSS_CONFIG,
             expected_scheduler_config=SCHEDULER_CONFIG,
+            expected_tiling_config=TILING_CONFIG,
         )
 
         # discard log entries that were written after the latest checkpoint
@@ -421,9 +467,13 @@ def main() -> None:
             scaler=scaler,
             amp_enabled=TRAIN_AMP_ENABLED,
             tile_grid_size=TILE_GRID_SIZE,
+            tile_overlap=TILE_OVERLAP,
+            tile_blend_mode=TILE_BLEND_MODE,
+            output_size=(INPUT_HEIGHT, INPUT_WIDTH),
             parallel_tile_processing=PARALLEL_TILE_PROCESSING,
             tile_chunk_size=TILE_CHUNK_SIZE,
             activation_checkpointing=ACTIVATION_CHECKPOINTING,
+            gradient_clip_max_norm=GRADIENT_CLIP_MAX_NORM,
             non_blocking_transfer=NON_BLOCKING_TRANSFER,
         )
 
@@ -437,6 +487,9 @@ def main() -> None:
             device=DEVICE,
             threshold=PRED_THRESHOLD,
             tile_grid_size=TILE_GRID_SIZE,
+            tile_overlap=TILE_OVERLAP,
+            tile_blend_mode=TILE_BLEND_MODE,
+            output_size=(INPUT_HEIGHT, INPUT_WIDTH),
             amp_enabled=TRAIN_AMP_ENABLED,
             parallel_tile_processing=PARALLEL_TILE_PROCESSING,
             tile_chunk_size=TILE_CHUNK_SIZE,
@@ -509,6 +562,7 @@ def main() -> None:
             scheduler=scheduler,
             loss_config=LOSS_CONFIG,
             scheduler_config=SCHEDULER_CONFIG,
+            tiling_config=TILING_CONFIG,
             epoch=current_epoch,
             best_val_loss=best_val_loss,
             best_loss_epoch=best_loss_epoch,
