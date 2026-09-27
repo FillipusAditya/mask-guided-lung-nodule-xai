@@ -49,7 +49,7 @@
         "attention_fusion_stage": "layer3",
         "attention_feature_channels": 1024,
         "attention_hidden_channels": 64,
-        "attention_alpha_initial_value": 0.0
+        "attention_alpha_initial_value": 0.1
     },
     "training": {
         "num_epochs": 100,

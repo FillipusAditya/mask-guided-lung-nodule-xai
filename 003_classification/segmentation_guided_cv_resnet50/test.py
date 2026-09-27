@@ -14,6 +14,7 @@ import matplotlib
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+from matplotlib.colors import to_rgba
 import numpy as np
 import pandas as pd
 import torch
@@ -37,13 +38,14 @@ from .transforms import build_val_transform
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 CLASSIFICATION_THRESHOLD = 0.5
+DEFAULT_EXPERIMENT_ID = "a0d90f9e-3dd4-4de0-98af-12858696f613"
+DEFAULT_RESULT_COMPONENT = "classification/guided_resnet50"
 CONFIG_PATH = (
     PROJECT_ROOT
     / "003_classification"
     / "configs"
     / "segmentation_guided_cv_resnet50.json"
 )
-DEFAULT_DATASET_ROOT = PROJECT_ROOT / "000_dataset/_segmentation_dataset_v2"
 CT_INPUT_COLUMNS = {
     "windowed": "ct_windowed_path",
     "parenchyma": "ct_parenchyma_path",
@@ -64,12 +66,21 @@ with CONFIG_PATH.open("r", encoding="utf-8") as file:
 
 DEFAULT_RESULT_DIR = (
     resolve_path(DEFAULT_CONFIG["output"]["root_directory"])
-    / str(DEFAULT_CONFIG["experiment"]["id"])
-    / str(DEFAULT_CONFIG["experiment"]["component"])
+    / DEFAULT_EXPERIMENT_ID
+    / DEFAULT_RESULT_COMPONENT
+)
+DEFAULT_DATASET_ROOT = resolve_path(DEFAULT_CONFIG["data"]["dataset_root"])
+DEFAULT_METADATA_PATH = resolve_path(DEFAULT_CONFIG["data"]["metadata_path"])
+DEFAULT_PROBABILITY_ROOT = resolve_path(
+    DEFAULT_CONFIG["data"]["probability_root"]
 )
 DEFAULT_SEGMENTATION_RUN_DIR = resolve_path(
     DEFAULT_CONFIG["data"]["probability_root"]
 ).parents[1]
+GROUND_TRUTH_FILL_COLOR = "#00FFFF"
+GROUND_TRUTH_INNER_OUTLINE_COLOR = "#FFFF00"
+GROUND_TRUTH_OUTER_OUTLINE_COLOR = "#000000"
+GROUND_TRUTH_FILL_ALPHA = 0.25
 
 
 def parse_args() -> argparse.Namespace:
@@ -82,8 +93,35 @@ def parse_args() -> argparse.Namespace:
         nargs="?",
         default=DEFAULT_RESULT_DIR,
         help=(
-            "Completed CV result directory. Defaults to the experiment and "
-            "component selected in the JSON configuration."
+            "Completed guided result directory. The default is "
+            f"{DEFAULT_RESULT_DIR}."
+        ),
+    )
+    parser.add_argument(
+        "--dataset-root",
+        type=Path,
+        default=None,
+        help=(
+            "Local dataset root override. By default the script uses "
+            f"{DEFAULT_DATASET_ROOT}."
+        ),
+    )
+    parser.add_argument(
+        "--metadata-path",
+        type=Path,
+        default=None,
+        help=(
+            "Local CV metadata override. By default the script uses "
+            f"{DEFAULT_METADATA_PATH}."
+        ),
+    )
+    parser.add_argument(
+        "--probability-root",
+        type=Path,
+        default=None,
+        help=(
+            "Local U-Net probability-map directory override. By default the "
+            f"script uses {DEFAULT_PROBABILITY_ROOT}."
         ),
     )
     parser.add_argument(
@@ -105,6 +143,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-samples", type=int, default=None)
     parser.add_argument("--dpi", type=int, default=120)
     return parser.parse_args()
+
 
 def select_device(requested: str) -> torch.device:
     if requested == "cuda" and not torch.cuda.is_available():
@@ -256,6 +295,9 @@ def load_run_config(result_dir: Path) -> tuple[dict[str, Any], list[Path]]:
 def relocate_colab_data_paths(
     config: dict[str, Any],
     result_dir: Path,
+    dataset_root_override: Path | None = None,
+    metadata_path_override: Path | None = None,
+    probability_root_override: Path | None = None,
 ) -> dict[str, Any]:
     """Replace unavailable absolute Colab paths with their local equivalents."""
 
@@ -263,7 +305,17 @@ def relocate_colab_data_paths(
     data = dict(config["data"])
 
     configured_dataset_root = resolve_path(data["dataset_root"])
-    dataset_candidates = (configured_dataset_root, DEFAULT_DATASET_ROOT)
+    dataset_candidates = tuple(
+        path
+        for path in (
+            resolve_path(dataset_root_override)
+            if dataset_root_override is not None
+            else None,
+            configured_dataset_root,
+            DEFAULT_DATASET_ROOT,
+        )
+        if path is not None
+    )
     dataset_root = next(
         (path.resolve() for path in dataset_candidates if path.is_dir()),
         None,
@@ -275,9 +327,17 @@ def relocate_colab_data_paths(
         )
 
     configured_metadata_path = resolve_path(data["metadata_path"])
-    metadata_candidates = (
-        configured_metadata_path,
-        dataset_root / configured_metadata_path.name,
+    metadata_candidates = tuple(
+        path
+        for path in (
+            resolve_path(metadata_path_override)
+            if metadata_path_override is not None
+            else None,
+            configured_metadata_path,
+            dataset_root / configured_metadata_path.name,
+            DEFAULT_METADATA_PATH,
+        )
+        if path is not None
     )
     metadata_path = next(
         (path.resolve() for path in metadata_candidates if path.is_file()),
@@ -290,11 +350,22 @@ def relocate_colab_data_paths(
         )
 
     configured_probability_root = resolve_path(data["probability_root"])
-    probability_candidates = (
-        configured_probability_root,
-        result_dir.parent / "inference/probability_npy",
-        result_dir.parents[1] / "segmentation/unet/inference/probability_npy",
-        DEFAULT_SEGMENTATION_RUN_DIR / "inference/probability_npy",
+    probability_candidates = tuple(
+        path
+        for path in (
+            resolve_path(probability_root_override)
+            if probability_root_override is not None
+            else None,
+            configured_probability_root,
+            result_dir.parents[1]
+            / "segmentation"
+            / "unet"
+            / "inference"
+            / "probability_npy",
+            DEFAULT_PROBABILITY_ROOT,
+            DEFAULT_SEGMENTATION_RUN_DIR / "inference/probability_npy",
+        )
+        if path is not None
     )
     probability_root = next(
         (path.resolve() for path in probability_candidates if path.is_dir()),
@@ -570,6 +641,36 @@ def load_display_array(path: Path, description: str) -> np.ndarray:
     return values
 
 
+def add_ground_truth_overlay(axis, mask: np.ndarray) -> None:
+    """Draw a transparent nodule mask with a contrasting double outline."""
+
+    binary_mask = np.asarray(mask, dtype=bool)
+    if not binary_mask.any():
+        return
+
+    colored_mask = np.zeros((*binary_mask.shape, 4), dtype=np.float32)
+    fill_color = to_rgba(
+        GROUND_TRUTH_FILL_COLOR,
+        alpha=GROUND_TRUTH_FILL_ALPHA,
+    )
+    colored_mask[binary_mask] = fill_color
+    axis.imshow(colored_mask, interpolation="nearest")
+
+    mask_values = binary_mask.astype(np.float32)
+    axis.contour(
+        mask_values,
+        levels=[0.5],
+        colors=[GROUND_TRUTH_OUTER_OUTLINE_COLOR],
+        linewidths=3.0,
+    )
+    axis.contour(
+        mask_values,
+        levels=[0.5],
+        colors=[GROUND_TRUTH_INNER_OUTLINE_COLOR],
+        linewidths=1.5,
+    )
+
+
 def save_study_figure(
     study_id: str,
     study_frame: pd.DataFrame,
@@ -603,8 +704,8 @@ def save_study_figure(
         ct_panel_title,
         "Ground-truth nodule mask",
         "U-Net probability heatmap",
-        "Grad-CAM overlay",
-        "LRP overlay",
+        "Grad-CAM + GT mask",
+        "LRP + GT mask",
     )
 
     for section, (nodule_id, nodule_frame) in zip(
@@ -689,6 +790,7 @@ def save_study_figure(
                 vmax=1.0,
                 interpolation="bilinear",
             )
+            add_ground_truth_overlay(row_axes[3], mask_display)
             row_axes[4].imshow(
                 display,
                 cmap="gray",
@@ -704,6 +806,7 @@ def save_study_figure(
                 vmax=1.0,
                 interpolation="bilinear",
             )
+            add_ground_truth_overlay(row_axes[4], mask_display)
 
             if row_index == 0:
                 for axis, column_title in zip(
@@ -919,14 +1022,21 @@ def main() -> None:
             "Batch size and DPI must be positive; workers cannot be negative."
         )
     result_dir = resolve_path(args.result_dir)
+    if not result_dir.is_dir():
+        raise FileNotFoundError(f"Classification result not found: {result_dir}")
     output_dir = result_dir / "test"
     config, config_sources = load_run_config(result_dir)
-    config = relocate_colab_data_paths(config, result_dir)
+    config = relocate_colab_data_paths(
+        config,
+        result_dir,
+        dataset_root_override=args.dataset_root,
+        metadata_path_override=args.metadata_path,
+        probability_root_override=args.probability_root,
+    )
     device = select_device(args.device)
     loader = build_test_loader(
         config, args.batch_size, args.num_workers, args.max_samples
     )
-    models = load_models(result_dir, config, device)
 
     print(f"Classification run : {result_dir}")
     print(
@@ -937,6 +1047,11 @@ def main() -> None:
     print(f"CT input type      : {config['data']['ct_input_type']}")
     print(f"CT path column     : {config['data']['ct_path_column']}")
     print(f"Probability maps   : {config['data']['probability_root']}")
+    print(f"Test samples       : {len(loader.dataset)}")
+    print(f"Device             : {device}")
+    print(f"Output directory   : {output_dir}")
+
+    models = load_models(result_dir, config, device)
 
     started = time.perf_counter()
     predictions, metrics, confusion = evaluate_and_explain(
@@ -985,9 +1100,15 @@ def main() -> None:
                 ),
                 "ground-truth nodule mask",
                 "U-Net probability heatmap",
-                "Grad-CAM overlay",
-                "LRP overlay",
+                "Grad-CAM + ground-truth mask",
+                "LRP + ground-truth mask",
             ],
+            "ground_truth_overlay": {
+                "fill_color": GROUND_TRUTH_FILL_COLOR,
+                "fill_alpha": GROUND_TRUTH_FILL_ALPHA,
+                "outer_outline_color": GROUND_TRUTH_OUTER_OUTLINE_COLOR,
+                "inner_outline_color": GROUND_TRUTH_INNER_OUTLINE_COLOR,
+            },
         },
     }
     with (output_dir / "test_results.json").open("w", encoding="utf-8") as file:

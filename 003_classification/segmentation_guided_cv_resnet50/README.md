@@ -13,9 +13,11 @@ Probability map -> resize -> Conv3x3 -> Conv1x1 -> sigmoid     |
                               A (1024x14x14)             F * (1 + alpha*A)
 ```
 
-`alpha` dipelajari dan diinisialisasi ke nol. Dengan demikian, model dimulai
-sebagai ResNet-50 biasa dan belajar seberapa kuat probability map perlu
-memandu fitur. CT dan probability map menerima transform geometris yang sama;
+`alpha` dipelajari dengan parameterisasi `softplus(raw_alpha)`, sehingga
+nilainya selalu positif dan tidak dapat menjadi negatif selama optimisasi.
+Nilai awal default adalah `0.1` dan dapat diatur melalui
+`model.attention_alpha_initial_value` atau cell konfigurasi notebook. CT dan
+probability map menerima transform geometris yang sama;
 augmentasi intensitas hanya diterapkan pada CT. Interpolasi linear dipakai
 untuk mempertahankan nilai probability map yang kontinu.
 

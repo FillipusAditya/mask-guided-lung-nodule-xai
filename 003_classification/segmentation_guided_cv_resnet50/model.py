@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import math
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -16,7 +18,7 @@ class ProbabilityAttention(nn.Module):
         self,
         channels: int = 1024,
         hidden_channels: int = 64,
-        alpha_initial_value: float = 0.0,
+        alpha_initial_value: float = 0.1,
     ) -> None:
         super().__init__()
         self.encoder = nn.Sequential(
@@ -26,9 +28,61 @@ class ProbabilityAttention(nn.Module):
             nn.Conv2d(hidden_channels, channels, kernel_size=1),
             nn.Sigmoid(),
         )
-        # Alpha=0 makes the initial network exactly equivalent to its ResNet
-        # backbone and lets training introduce mask guidance gradually.
-        self.alpha = nn.Parameter(torch.tensor(float(alpha_initial_value)))
+        alpha_initial_value = float(alpha_initial_value)
+        if (
+            not math.isfinite(alpha_initial_value)
+            or alpha_initial_value <= 0.0
+        ):
+            raise ValueError(
+                "alpha_initial_value must be finite and strictly positive, "
+                f"received {alpha_initial_value}."
+            )
+        self.raw_alpha = nn.Parameter(
+            torch.tensor(self._inverse_softplus(alpha_initial_value))
+        )
+
+    @staticmethod
+    def _inverse_softplus(value: float) -> float:
+        """Return a numerically stable inverse of softplus for value > 0."""
+
+        return value + math.log(-math.expm1(-value))
+
+    @property
+    def alpha(self) -> torch.Tensor:
+        """Return the effective, strictly positive guidance strength."""
+
+        return F.softplus(self.raw_alpha)
+
+    def _load_from_state_dict(
+        self,
+        state_dict,
+        prefix,
+        local_metadata,
+        strict,
+        missing_keys,
+        unexpected_keys,
+        error_msgs,
+    ) -> None:
+        """Convert legacy checkpoints that stored an unconstrained alpha."""
+
+        legacy_key = prefix + "alpha"
+        raw_key = prefix + "raw_alpha"
+        if legacy_key in state_dict and raw_key not in state_dict:
+            legacy_alpha = state_dict.pop(legacy_key).detach()
+            epsilon = torch.finfo(legacy_alpha.dtype).eps
+            positive_alpha = legacy_alpha.clamp_min(epsilon)
+            state_dict[raw_key] = positive_alpha + torch.log(
+                -torch.expm1(-positive_alpha)
+            )
+        super()._load_from_state_dict(
+            state_dict,
+            prefix,
+            local_metadata,
+            strict,
+            missing_keys,
+            unexpected_keys,
+            error_msgs,
+        )
 
     def forward(
         self,
@@ -59,7 +113,7 @@ class SegmentationGuidedResNet50(nn.Module):
         dropout: float = 0.3,
         weights: ResNet50_Weights | None = ResNet50_Weights.DEFAULT,
         attention_hidden_channels: int = 64,
-        attention_alpha_initial_value: float = 0.0,
+        attention_alpha_initial_value: float = 0.1,
     ) -> None:
         super().__init__()
         self.backbone = models.resnet50(weights=weights)

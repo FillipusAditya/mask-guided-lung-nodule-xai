@@ -4,6 +4,7 @@ import argparse
 from collections import Counter
 from datetime import datetime
 import json
+import math
 from pathlib import Path
 import shutil
 import time
@@ -228,6 +229,14 @@ ATTENTION_HIDDEN_CHANNELS = int(MODEL_CONFIG["attention_hidden_channels"])
 ATTENTION_ALPHA_INITIAL_VALUE = float(
     MODEL_CONFIG["attention_alpha_initial_value"]
 )
+if (
+    not math.isfinite(ATTENTION_ALPHA_INITIAL_VALUE)
+    or ATTENTION_ALPHA_INITIAL_VALUE <= 0.0
+):
+    raise ValueError(
+        "model.attention_alpha_initial_value must be finite and strictly "
+        f"positive, received {ATTENTION_ALPHA_INITIAL_VALUE}."
+    )
 
 NUM_WORKERS = int(DATALOADER_CONFIG["num_workers"])
 PERSISTENT_WORKERS = bool(DATALOADER_CONFIG["persistent_workers"])
@@ -286,6 +295,7 @@ SUMMARY_METRICS = (
     "best_precision",
     "best_f1_score",
     "best_auc",
+    "best_attention_alpha",
 )
 
 
@@ -646,6 +656,8 @@ def build_fold_config(
                 "attention_hidden_channels": ATTENTION_HIDDEN_CHANNELS,
                 "equation": "F_guided = F * (1 + alpha * A)",
                 "alpha_initial_value": ATTENTION_ALPHA_INITIAL_VALUE,
+                "alpha_parameterization": "softplus(raw_alpha)",
+                "alpha_constraint": "alpha > 0",
             },
         }
     )
@@ -723,6 +735,8 @@ def build_cv_config(metadata: pd.DataFrame) -> dict[str, object]:
             "attention_feature_channels": ATTENTION_FEATURE_CHANNELS,
             "attention_hidden_channels": ATTENTION_HIDDEN_CHANNELS,
             "attention_alpha_initial_value": ATTENTION_ALPHA_INITIAL_VALUE,
+            "attention_alpha_parameterization": "softplus(raw_alpha)",
+            "attention_alpha_constraint": "alpha > 0",
         },
         "training": {
             "epochs_per_fold": NUM_EPOCHS,
@@ -848,6 +862,7 @@ def run_fold(fold: int) -> tuple[dict[str, object], pd.DataFrame]:
     print(f"Validation patients: {val_dataset.metadata[GROUP_COLUMN].nunique()}")
     print(f"Learning rate      : {LEARNING_RATE:.3e} (constant)")
     print(f"Optimizer          : SGD (momentum={MOMENTUM_OPTM:.1f})")
+    print(f"Initial alpha      : {float(model.attention.alpha.detach()):.6f}")
     print(f"Device             : {DEVICE}")
     print()
 
@@ -977,6 +992,10 @@ def run_fold(fold: int) -> tuple[dict[str, object], pd.DataFrame]:
         print(f"Validation Loss     : {val_metrics['loss']:.4f}")
         print(f"Validation Accuracy : {val_metrics['accuracy']:.2%}")
         print(f"Validation ROC-AUC  : {val_metrics['auc']:.4f}")
+        print(
+            "Guidance Alpha     : "
+            f"{float(model.attention.alpha.detach()):.6f}"
+        )
         print()
 
         if stopped_early:
@@ -1065,13 +1084,17 @@ def run_fold(fold: int) -> tuple[dict[str, object], pd.DataFrame]:
         "best_precision": best_val_metrics["precision"],
         "best_f1_score": best_val_metrics["f1_score"],
         "best_auc": best_val_metrics["auc"],
+        "best_attention_alpha": float(
+            model.attention.alpha.detach().cpu()
+        ),
         "total_training_seconds": total_training_seconds,
         "best_model_path": str(paths["best_model"]),
     }
     print(
         f"Fold {fold} complete: best epoch={best_epoch}, "
         f"val_loss={best_val_metrics['loss']:.4f}, "
-        f"ROC-AUC={best_val_metrics['auc']:.4f}"
+        f"ROC-AUC={best_val_metrics['auc']:.4f}, "
+        f"alpha={float(model.attention.alpha.detach()):.6f}"
     )
     return summary, validation_predictions
 
