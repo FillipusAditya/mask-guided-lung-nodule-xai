@@ -54,6 +54,7 @@ CV_CONFIG = CONFIG["cross_validation"]
 MODEL_CONFIG = CONFIG["model"]
 TRAINING_CONFIG = CONFIG["training"]
 OPTIMIZER_CONFIG = CONFIG["optimizer"]
+SCHEDULER_CONFIG = CONFIG["scheduler"]
 DATALOADER_CONFIG = CONFIG["dataloader"]
 EARLY_STOPPING_CONFIG = CONFIG["early_stopping"]
 CHECKPOINT_CONFIG = CONFIG["checkpoint"]
@@ -123,6 +124,18 @@ MOMENTUM = float(OPTIMIZER_CONFIG["momentum"])
 WEIGHT_DECAY = float(OPTIMIZER_CONFIG["weight_decay"])
 NESTEROV = bool(OPTIMIZER_CONFIG["nesterov"])
 
+SCHEDULER_ENABLED = bool(SCHEDULER_CONFIG["enabled"])
+SCHEDULER_NAME = str(SCHEDULER_CONFIG["name"])
+SCHEDULER_MODE = str(SCHEDULER_CONFIG["mode"])
+SCHEDULER_LEARNING_RATES = [
+    float(value) for value in SCHEDULER_CONFIG["learning_rates"]
+]
+SCHEDULER_PATIENCE = int(SCHEDULER_CONFIG["patience"])
+SCHEDULER_THRESHOLD = float(SCHEDULER_CONFIG["threshold"])
+SCHEDULER_THRESHOLD_MODE = str(SCHEDULER_CONFIG["threshold_mode"])
+SCHEDULER_COOLDOWN = int(SCHEDULER_CONFIG["cooldown"])
+SCHEDULER_MAX_REDUCTIONS = max(0, len(SCHEDULER_LEARNING_RATES) - 1)
+
 NUM_WORKERS = int(DATALOADER_CONFIG["num_workers"])
 PERSISTENT_WORKERS = bool(DATALOADER_CONFIG["persistent_workers"])
 PREFETCH_FACTOR = int(DATALOADER_CONFIG["prefetch_factor"])
@@ -183,6 +196,44 @@ def validate_configuration() -> None:
 
     if MODEL_ARCHITECTURE != "ResNet50":
         raise ValueError("Only architecture='ResNet50' is supported.")
+    if TRAINING_STRATEGY != "last_residual_stage_and_classifier_fine_tuning":
+        raise ValueError(
+            "training_strategy must freeze the ResNet-50 stem and layer1-3, "
+            "then train layer4 and fc."
+        )
+    if TRAINABLE_COMPONENT != "layer4_and_fc":
+        raise ValueError("trainable_component must be layer4_and_fc.")
+    if not 0.0 <= CLASSIFIER_DROPOUT < 1.0:
+        raise ValueError("classifier_dropout must be in the range [0, 1).")
+    if SCHEDULER_NAME != "PlateauLearningRateSequence":
+        raise ValueError(
+            "Only the PlateauLearningRateSequence scheduler is supported."
+        )
+    if SCHEDULER_MODE != "min":
+        raise ValueError("The scheduler must minimize validation loss.")
+    if not SCHEDULER_LEARNING_RATES:
+        raise ValueError("scheduler.learning_rates must not be empty.")
+    if any(value <= 0.0 for value in SCHEDULER_LEARNING_RATES):
+        raise ValueError("Every scheduler learning rate must be positive.")
+    if any(
+        current <= following
+        for current, following in zip(
+            SCHEDULER_LEARNING_RATES,
+            SCHEDULER_LEARNING_RATES[1:],
+        )
+    ):
+        raise ValueError("scheduler.learning_rates must be strictly decreasing.")
+    if abs(SCHEDULER_LEARNING_RATES[0] - LEARNING_RATE) > 1e-15:
+        raise ValueError(
+            "The initial training learning rate must equal "
+            "scheduler.learning_rates[0]."
+        )
+    if SCHEDULER_PATIENCE < 0 or SCHEDULER_COOLDOWN < 0:
+        raise ValueError("Scheduler patience and cooldown cannot be negative.")
+    if SCHEDULER_THRESHOLD < 0.0:
+        raise ValueError("scheduler.threshold cannot be negative.")
+    if SCHEDULER_THRESHOLD_MODE not in {"rel", "abs"}:
+        raise ValueError("scheduler.threshold_mode must be rel or abs.")
     if str(OPTIMIZER_CONFIG["name"]).upper() != "SGD":
         raise ValueError("Only the SGD optimizer is supported.")
     if ROLE_COLUMN != "cv_role" or FOLD_COLUMN != "cv_fold":
@@ -376,7 +427,7 @@ def assert_fold_isolation(
 # Model and epoch loops
 # ---------------------------------------------------------------------------
 def build_model(num_classes: int) -> nn.Module:
-    """Create a fully trainable pretrained ResNet-50."""
+    """Create ResNet-50 with layer4 and the classifier trainable."""
 
     model = models.resnet50(weights=WEIGHTS)
     input_features = model.fc.in_features
@@ -385,21 +436,141 @@ def build_model(num_classes: int) -> nn.Module:
         nn.Linear(input_features, num_classes),
     )
     for parameter in model.parameters():
+        parameter.requires_grad = False
+    for parameter in model.layer4.parameters():
         parameter.requires_grad = True
-    assert_full_model_trainable(model)
+    for parameter in model.fc.parameters():
+        parameter.requires_grad = True
+    assert_expected_trainable_parameters(model)
     return model.to(DEVICE)
 
 
-def assert_full_model_trainable(model: nn.Module) -> None:
-    """Verify that every parameter is trainable."""
+def assert_expected_trainable_parameters(model: nn.Module) -> None:
+    """Verify that only layer4 and fc are trainable."""
 
-    frozen = [
+    incorrectly_trainable = [
         name
         for name, parameter in model.named_parameters()
-        if not parameter.requires_grad
+        if not name.startswith(("layer4.", "fc.")) and parameter.requires_grad
     ]
-    if frozen:
-        raise RuntimeError(f"Full fine-tuning found frozen parameters: {frozen}")
+    incorrectly_frozen = [
+        name
+        for name, parameter in model.named_parameters()
+        if name.startswith(("layer4.", "fc.")) and not parameter.requires_grad
+    ]
+    if incorrectly_trainable or incorrectly_frozen:
+        raise RuntimeError(
+            "Unexpected ResNet-50 freezing policy: "
+            f"incorrectly_trainable={incorrectly_trainable}, "
+            f"incorrectly_frozen={incorrectly_frozen}"
+        )
+
+
+def set_frozen_batch_norm_eval(model: nn.Module) -> None:
+    """Keep BatchNorm statistics fixed outside trainable layer4."""
+
+    for module in model.modules():
+        if not isinstance(module, nn.BatchNorm2d):
+            continue
+        parameters = tuple(module.parameters(recurse=False))
+        if parameters and not any(parameter.requires_grad for parameter in parameters):
+            module.eval()
+
+
+class PlateauLearningRateSequence:
+    """Advance through explicit learning rates when validation loss plateaus."""
+
+    def __init__(
+        self,
+        optimizer: torch.optim.Optimizer,
+        learning_rates: tuple[float, ...],
+        patience: int,
+        threshold: float,
+        threshold_mode: str,
+        cooldown: int,
+    ) -> None:
+        self.optimizer = optimizer
+        self.learning_rates = learning_rates
+        self.patience = patience
+        self.threshold = threshold
+        self.threshold_mode = threshold_mode
+        self.cooldown = cooldown
+        self.current_index = 0
+        self.best: float | None = None
+        self.num_bad_epochs = 0
+        self.cooldown_counter = 0
+        self._set_learning_rate(self.learning_rates[0])
+
+    def _set_learning_rate(self, learning_rate: float) -> None:
+        for parameter_group in self.optimizer.param_groups:
+            parameter_group["lr"] = learning_rate
+
+    def _is_improvement(self, metric: float) -> bool:
+        if self.best is None:
+            return True
+        if self.threshold_mode == "rel":
+            return metric < self.best * (1.0 - self.threshold)
+        return metric < self.best - self.threshold
+
+    def step(self, metric: float) -> None:
+        if self._is_improvement(metric):
+            self.best = metric
+            self.num_bad_epochs = 0
+            return
+        if self.cooldown_counter > 0:
+            self.cooldown_counter -= 1
+            return
+        self.num_bad_epochs += 1
+        can_reduce = self.current_index + 1 < len(self.learning_rates)
+        if self.num_bad_epochs > self.patience and can_reduce:
+            self.current_index += 1
+            self._set_learning_rate(self.learning_rates[self.current_index])
+            self.num_bad_epochs = 0
+            self.cooldown_counter = self.cooldown
+
+    def state_dict(self) -> dict[str, object]:
+        """Return the serializable scheduler state."""
+
+        return {
+            "learning_rates": list(self.learning_rates),
+            "patience": self.patience,
+            "threshold": self.threshold,
+            "threshold_mode": self.threshold_mode,
+            "cooldown": self.cooldown,
+            "current_index": self.current_index,
+            "best": self.best,
+            "num_bad_epochs": self.num_bad_epochs,
+            "cooldown_counter": self.cooldown_counter,
+        }
+
+    def load_state_dict(self, state: dict[str, object]) -> None:
+        """Restore scheduler progress and the optimizer learning rate."""
+
+        saved_rates = tuple(float(value) for value in state["learning_rates"])
+        if saved_rates != self.learning_rates:
+            raise ValueError("Checkpoint scheduler learning rates do not match config.")
+        self.current_index = int(state["current_index"])
+        self.best = None if state["best"] is None else float(state["best"])
+        self.num_bad_epochs = int(state["num_bad_epochs"])
+        self.cooldown_counter = int(state["cooldown_counter"])
+        self._set_learning_rate(self.learning_rates[self.current_index])
+
+
+def build_scheduler(
+    optimizer: torch.optim.Optimizer,
+) -> PlateauLearningRateSequence | None:
+    """Create the validation-loss scheduler when it is enabled."""
+
+    if not SCHEDULER_ENABLED:
+        return None
+    return PlateauLearningRateSequence(
+        optimizer=optimizer,
+        learning_rates=tuple(SCHEDULER_LEARNING_RATES),
+        patience=SCHEDULER_PATIENCE,
+        threshold=SCHEDULER_THRESHOLD,
+        threshold_mode=SCHEDULER_THRESHOLD_MODE,
+        cooldown=SCHEDULER_COOLDOWN,
+    )
 
 
 def train_one_epoch(
@@ -413,6 +584,7 @@ def train_one_epoch(
     """Train the model over all batches once."""
 
     model.train()
+    set_frozen_batch_norm_eval(model)
     running_loss = 0.0
     correct_predictions = 0
     total_samples = 0
@@ -544,6 +716,7 @@ def save_latest_checkpoint(
     fold: int,
     model: nn.Module,
     optimizer: torch.optim.Optimizer,
+    scheduler: PlateauLearningRateSequence | None,
     epoch: int,
     train_loss: float,
     train_accuracy: float,
@@ -552,6 +725,7 @@ def save_latest_checkpoint(
     best_epoch: int,
     num_classes: int,
     early_stopping: EarlyStopping,
+    lr_reduction_count: int,
 ) -> None:
     """Save the current fold state so the run can be inspected."""
 
@@ -566,7 +740,10 @@ def save_latest_checkpoint(
             "batch_size": BATCH_SIZE,
             "model_state_dict": model.state_dict(),
             "optimizer_state_dict": optimizer.state_dict(),
-            "scheduler_state_dict": None,
+            "scheduler_state_dict": (
+                scheduler.state_dict() if scheduler is not None else None
+            ),
+            "lr_reduction_count": lr_reduction_count,
             "early_stopping_state_dict": early_stopping.state_dict(),
             "train_loss": train_loss,
             "train_accuracy": train_accuracy,
@@ -626,8 +803,19 @@ def build_fold_config(
             "pretrained_weights": str(WEIGHTS),
             "num_classes": len(train_dataset.classes),
             "backbone_frozen": False,
-            "batch_norm_frozen": False,
-            "batch_norm_mode_during_training": "train",
+            "backbone_partially_frozen": True,
+            "frozen_components": [
+                "conv1",
+                "bn1",
+                "layer1",
+                "layer2",
+                "layer3",
+            ],
+            "trainable_components": ["layer4", "fc"],
+            "batch_norm_partially_frozen": True,
+            "batch_norm_mode_during_training": (
+                "eval_for_frozen_components_train_for_layer4"
+            ),
             "trainable_component": TRAINABLE_COMPONENT,
             "classifier": {
                 "architecture": "dropout_linear",
@@ -677,7 +865,9 @@ def build_fold_config(
             "batch_size": BATCH_SIZE,
             "num_epochs": NUM_EPOCHS,
             "seed": SEED,
-            "learning_rate_behavior": "constant",
+            "learning_rate_behavior": (
+                "reduce_on_plateau" if SCHEDULER_ENABLED else "constant"
+            ),
             "cross_validation": True,
             "num_folds": NUM_FOLDS,
             "seed_reset_before_each_fold": True,
@@ -700,14 +890,25 @@ def build_fold_config(
         },
         "optimizer": {
             "name": optimizer.__class__.__name__,
-            "optimized_parameter_scope": "entire_model",
+            "optimized_parameter_scope": TRAINABLE_COMPONENT,
             "initial_learning_rate": optimizer_group["lr"],
             "weight_decay": optimizer_group["weight_decay"],
             "momentum": optimizer_group["momentum"],
             "dampening": optimizer_group["dampening"],
             "nesterov": optimizer_group["nesterov"],
         },
-        "scheduler": None,
+        "scheduler": {
+            "enabled": SCHEDULER_ENABLED,
+            "name": SCHEDULER_NAME,
+            "monitor": "val_loss",
+            "mode": SCHEDULER_MODE,
+            "learning_rates": list(SCHEDULER_LEARNING_RATES),
+            "patience": SCHEDULER_PATIENCE,
+            "threshold": SCHEDULER_THRESHOLD,
+            "threshold_mode": SCHEDULER_THRESHOLD_MODE,
+            "cooldown": SCHEDULER_COOLDOWN,
+            "max_reductions": SCHEDULER_MAX_REDUCTIONS,
+        },
         "early_stopping": {
             "enabled": True,
             "monitor": BEST_MODEL_MONITOR,
@@ -827,7 +1028,18 @@ def build_cv_config(metadata: pd.DataFrame) -> dict[str, object]:
             "weight_decay": WEIGHT_DECAY,
             "nesterov": NESTEROV,
         },
-        "scheduler": None,
+        "scheduler": {
+            "enabled": SCHEDULER_ENABLED,
+            "name": SCHEDULER_NAME,
+            "monitor": "val_loss",
+            "mode": SCHEDULER_MODE,
+            "learning_rates": list(SCHEDULER_LEARNING_RATES),
+            "patience": SCHEDULER_PATIENCE,
+            "threshold": SCHEDULER_THRESHOLD,
+            "threshold_mode": SCHEDULER_THRESHOLD_MODE,
+            "cooldown": SCHEDULER_COOLDOWN,
+            "max_reductions": SCHEDULER_MAX_REDUCTIONS,
+        },
         "early_stopping": {
             "enabled": True,
             "monitor": BEST_MODEL_MONITOR,
@@ -902,12 +1114,14 @@ def run_fold(fold: int) -> tuple[dict[str, object], pd.DataFrame]:
 
     model = build_model(num_classes)
     optimizer = torch.optim.SGD(
-        model.parameters(),
+        (parameter for parameter in model.parameters() if parameter.requires_grad),
         lr=LEARNING_RATE,
         momentum=MOMENTUM,
         weight_decay=WEIGHT_DECAY,
         nesterov=NESTEROV,
     )
+    scheduler = build_scheduler(optimizer)
+    lr_reduction_count = 0
     criterion = nn.CrossEntropyLoss()
     fold_config = build_fold_config(
         fold,
@@ -929,6 +1143,7 @@ def run_fold(fold: int) -> tuple[dict[str, object], pd.DataFrame]:
     print(f"Training samples   : {len(train_dataset)}")
     print(f"Validation samples : {len(val_dataset)}")
     print(f"Learning rate      : {LEARNING_RATE:.3e}")
+    print(f"Scheduler          : {SCHEDULER_NAME if scheduler else 'disabled'}")
     print(f"Device             : {DEVICE}")
     print()
 
@@ -971,6 +1186,7 @@ def run_fold(fold: int) -> tuple[dict[str, object], pd.DataFrame]:
         val_time = time.perf_counter() - val_started_at
 
         current_metric = val_metrics["loss"]
+        learning_rate = float(optimizer.param_groups[0]["lr"])
         is_best = current_metric < best_metric
         if is_best:
             best_metric = current_metric
@@ -979,6 +1195,20 @@ def run_fold(fold: int) -> tuple[dict[str, object], pd.DataFrame]:
             print(f"Best model updated: val_loss={current_metric:.4f}")
 
         stopped_early = early_stopping(current_metric, epoch)
+        if scheduler is not None and lr_reduction_count < SCHEDULER_MAX_REDUCTIONS:
+            scheduler.step(current_metric)
+        next_learning_rate = float(optimizer.param_groups[0]["lr"])
+        scheduler_updated = next_learning_rate < learning_rate - 1e-15
+        if scheduler_updated:
+            lr_reduction_count += 1
+            print(
+                f"Learning rate reduced: {learning_rate:.3e} -> "
+                f"{next_learning_rate:.3e} "
+                f"({lr_reduction_count}/{SCHEDULER_MAX_REDUCTIONS})"
+            )
+        scheduler_patience_counter = (
+            int(scheduler.num_bad_epochs) if scheduler is not None else 0
+        )
         checkpoint_saved = False
         if SAVE_LATEST_CHECKPOINT:
             save_latest_checkpoint(
@@ -986,6 +1216,7 @@ def run_fold(fold: int) -> tuple[dict[str, object], pd.DataFrame]:
                 fold,
                 model,
                 optimizer,
+                scheduler,
                 epoch,
                 train_loss,
                 train_accuracy,
@@ -994,6 +1225,7 @@ def run_fold(fold: int) -> tuple[dict[str, object], pd.DataFrame]:
                 best_epoch,
                 num_classes,
                 early_stopping,
+                lr_reduction_count,
             )
             checkpoint_saved = True
 
@@ -1020,8 +1252,8 @@ def run_fold(fold: int) -> tuple[dict[str, object], pd.DataFrame]:
             gpu_memory_allocated_mb=allocated_memory,
             train_time_sec=train_time,
             val_time_sec=val_time,
-            scheduler_updated=False,
-            patience_counter=0,
+            scheduler_updated=scheduler_updated,
+            patience_counter=scheduler_patience_counter,
             best_metric=best_metric,
             checkpoint_saved=checkpoint_saved,
             samples_per_sec=samples_per_second,
@@ -1029,7 +1261,7 @@ def run_fold(fold: int) -> tuple[dict[str, object], pd.DataFrame]:
             val_batches=len(val_loader),
             gpu_memory_reserved_mb=reserved_memory,
             stopped_early=stopped_early,
-            learning_rate=optimizer.param_groups[0]["lr"],
+            learning_rate=next_learning_rate,
             train_loss=train_loss,
             train_accuracy=train_accuracy,
             val_loss=val_metrics["loss"],
@@ -1045,6 +1277,7 @@ def run_fold(fold: int) -> tuple[dict[str, object], pd.DataFrame]:
         print(f"Validation loss    : {val_metrics['loss']:.4f}")
         print(f"Validation accuracy: {val_metrics['accuracy']:.2%}")
         print(f"Validation ROC-AUC : {val_metrics['auc']:.4f}")
+        print(f"Next learning rate : {next_learning_rate:.3e}")
         print()
         if stopped_early:
             print(f"Early stopping at epoch {epoch}.")
@@ -1117,6 +1350,9 @@ def run_fold(fold: int) -> tuple[dict[str, object], pd.DataFrame]:
         "best_epoch": best_epoch,
         "epochs_completed": epoch,
         "stopped_early": stopped_early,
+        "scheduler_enabled": SCHEDULER_ENABLED,
+        "lr_reduction_count": lr_reduction_count,
+        "final_learning_rate": float(optimizer.param_groups[0]["lr"]),
         "best_val_loss": best_metrics["loss"],
         "best_val_accuracy": best_metrics["accuracy"],
         "best_sensitivity": best_metrics["sensitivity"],
@@ -1239,6 +1475,8 @@ def main() -> None:
     print(f"Folds               : {list(CV_FOLDS)}")
     print(f"Epochs per fold     : {NUM_EPOCHS}")
     print(f"Batch size          : {BATCH_SIZE}")
+    scheduler_label = SCHEDULER_NAME if SCHEDULER_ENABLED else "disabled"
+    print(f"Scheduler           : {scheduler_label}")
     print("Holdout test        : not used during cross-validation")
     print()
 

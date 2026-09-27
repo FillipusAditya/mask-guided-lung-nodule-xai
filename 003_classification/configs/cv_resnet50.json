@@ -41,14 +41,14 @@
     "model": {
         "architecture": "ResNet50",
         "pretrained_weights": "DEFAULT",
-        "training_strategy": "full_fine_tuning",
-        "trainable_component": "entire_model",
+        "training_strategy": "last_residual_stage_and_classifier_fine_tuning",
+        "trainable_component": "layer4_and_fc",
         "classifier_dropout": 0.3
     },
     "training": {
         "num_epochs": 100,
         "batch_size": 32,
-        "learning_rate": 0.001,
+        "learning_rate": 1e-05,
         "seed": 42,
         "transform_seed": 42,
         "classification_threshold": 0.5,
@@ -60,9 +60,23 @@
         "weight_decay": 0.0001,
         "nesterov": false
     },
+    "scheduler": {
+        "enabled": true,
+        "name": "PlateauLearningRateSequence",
+        "mode": "min",
+        "learning_rates": [
+            1e-05,
+            5e-06,
+            1e-06
+        ],
+        "patience": 3,
+        "threshold": 0.0001,
+        "threshold_mode": "rel",
+        "cooldown": 0
+    },
     "dataloader": {
         "num_workers": 2,
-        "persistent_workers": true,
+        "persistent_workers": false,
         "prefetch_factor": 2,
         "pin_memory": true,
         "train_shuffle": true,
@@ -74,7 +88,7 @@
         "enabled": true,
         "monitor": "val_loss",
         "mode": "min",
-        "patience": 5,
+        "patience": 12,
         "min_delta": 0.0,
         "verbose": true,
         "restore_best_weights": true
