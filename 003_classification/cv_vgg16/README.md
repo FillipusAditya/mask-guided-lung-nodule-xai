@@ -1,8 +1,9 @@
 # VGG-16 5-fold baseline
 
-This baseline uses full fine-tuning of VGG-16 with three-channel CT input.
-It does not use a mask or probability map as model input. The data splits,
-preprocessing, optimizer, early stopping, and evaluation are consistent with
+This baseline uses a pretrained VGG-16 with three-channel CT input. Feature
+blocks 1-4 are frozen, while feature block 5 and the entire original VGG-16
+classifier are trainable. It does not use a mask or probability map as model
+input. The data splits, preprocessing, and evaluation are consistent with
 `cv_resnet50` to support a fair comparison.
 
 `train.py` is a standalone training program. It only uses shared functions
@@ -35,10 +36,10 @@ LRP uses Zennit `VGGCanonizer`. The ground-truth mask is only used for visual
 interpretation and is never passed to the baseline model.
 
 The plateau scheduler is enabled by default and advances through the explicit
-learning-rate sequence `1e-3, 5e-4, 1e-4, 5e-5, 1e-5, 5e-6, 1e-6`. Set
-`scheduler.enabled` to `false` for a constant learning rate. The default
-`scheduler.patience` is 3, while `early_stopping.patience` is 30 so every
-configured learning rate can be attempted during a long validation plateau.
+learning-rate sequence `1e-5, 5e-6, 1e-6`. Set `scheduler.enabled` to `false`
+for a constant learning rate. The default `scheduler.patience` is 3, while
+`early_stopping.patience` is 12 so the lower learning rates can be attempted
+without unnecessarily extending a validation plateau.
 The Colab notebook exposes the same values through `SCHEDULER_LEARNING_RATES`,
 `SCHEDULER_PATIENCE`, and `EARLY_STOPPING_PATIENCE`. Scheduler progress and the
 number of learning-rate reductions are saved in each latest checkpoint.

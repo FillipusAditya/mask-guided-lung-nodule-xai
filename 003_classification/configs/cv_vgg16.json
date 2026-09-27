@@ -41,14 +41,14 @@
     "model": {
         "architecture": "VGG16",
         "pretrained_weights": "DEFAULT",
-        "training_strategy": "full_fine_tuning",
-        "trainable_component": "entire_model",
+        "training_strategy": "last_convolutional_block_and_classifier_fine_tuning",
+        "trainable_component": "features_block5_and_entire_classifier",
         "classifier_dropout": 0.5
     },
     "training": {
         "num_epochs": 100,
         "batch_size": 32,
-        "learning_rate": 0.001,
+        "learning_rate": 1e-05,
         "seed": 42,
         "transform_seed": 42,
         "classification_threshold": 0.5,
@@ -65,10 +65,6 @@
         "name": "PlateauLearningRateSequence",
         "mode": "min",
         "learning_rates": [
-            0.001,
-            0.0005,
-            0.0001,
-            5e-05,
             1e-05,
             5e-06,
             1e-06
@@ -92,7 +88,7 @@
         "enabled": true,
         "monitor": "val_loss",
         "mode": "min",
-        "patience": 30,
+        "patience": 12,
         "min_delta": 0.0,
         "verbose": true,
         "restore_best_weights": true

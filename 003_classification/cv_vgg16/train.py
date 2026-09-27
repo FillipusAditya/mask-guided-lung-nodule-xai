@@ -190,12 +190,25 @@ SUMMARY_METRICS = (
     "best_auc",
 )
 
+VGG16_LAST_CONV_BLOCK = 5
+VGG16_LAST_CONV_BLOCK_START_INDEX = 24
+
 
 def validate_configuration() -> None:
     """Validate values that are required by this baseline."""
 
     if MODEL_ARCHITECTURE != "VGG16":
         raise ValueError("Only architecture='VGG16' is supported.")
+    if TRAINING_STRATEGY != "last_convolutional_block_and_classifier_fine_tuning":
+        raise ValueError(
+            "training_strategy must freeze VGG-16 feature blocks 1-4 and train "
+            "feature block 5 plus the entire classifier."
+        )
+    if TRAINABLE_COMPONENT != "features_block5_and_entire_classifier":
+        raise ValueError(
+            "trainable_component must be "
+            "'features_block5_and_entire_classifier'."
+        )
     if str(OPTIMIZER_CONFIG["name"]).upper() != "SGD":
         raise ValueError("Only the SGD optimizer is supported.")
     if SCHEDULER_NAME != "PlateauLearningRateSequence":
@@ -418,7 +431,7 @@ def assert_fold_isolation(
 # Model and epoch loops
 # ---------------------------------------------------------------------------
 def build_model(num_classes: int) -> nn.Module:
-    """Create a fully trainable pretrained VGG-16."""
+    """Create VGG-16 with feature block 5 and the classifier trainable."""
 
     model = models.vgg16(weights=WEIGHTS)
     model.classifier[2].p = CLASSIFIER_DROPOUT
@@ -428,22 +441,40 @@ def build_model(num_classes: int) -> nn.Module:
     for module in model.modules():
         if isinstance(module, nn.ReLU):
             module.inplace = False
-    for parameter in model.parameters():
+    for parameter in model.features.parameters():
+        parameter.requires_grad = False
+    for parameter in model.features[VGG16_LAST_CONV_BLOCK_START_INDEX:].parameters():
         parameter.requires_grad = True
-    assert_full_model_trainable(model)
+    for parameter in model.classifier.parameters():
+        parameter.requires_grad = True
+    assert_expected_trainable_parameters(model)
     return model.to(DEVICE)
 
 
-def assert_full_model_trainable(model: nn.Module) -> None:
-    """Verify that every parameter is trainable."""
+def assert_expected_trainable_parameters(model: nn.Module) -> None:
+    """Verify the feature-block and classifier freezing policy."""
 
-    frozen = [
-        name
-        for name, parameter in model.named_parameters()
+    frozen_features = model.features[:VGG16_LAST_CONV_BLOCK_START_INDEX]
+    trainable_features = model.features[VGG16_LAST_CONV_BLOCK_START_INDEX:]
+    incorrectly_trainable = [
+        name for name, parameter in frozen_features.named_parameters()
+        if parameter.requires_grad
+    ]
+    incorrectly_frozen = [
+        name for name, parameter in trainable_features.named_parameters()
         if not parameter.requires_grad
     ]
-    if frozen:
-        raise RuntimeError(f"Full fine-tuning found frozen parameters: {frozen}")
+    incorrectly_frozen.extend(
+        f"classifier.{name}"
+        for name, parameter in model.classifier.named_parameters()
+        if not parameter.requires_grad
+    )
+    if incorrectly_trainable or incorrectly_frozen:
+        raise RuntimeError(
+            "Unexpected VGG-16 freezing policy: "
+            f"incorrectly_trainable={incorrectly_trainable}, "
+            f"incorrectly_frozen={incorrectly_frozen}"
+        )
 
 
 class PlateauLearningRateSequence:
@@ -778,6 +809,9 @@ def build_fold_config(
             "pretrained_weights": str(WEIGHTS),
             "num_classes": len(train_dataset.classes),
             "backbone_frozen": False,
+            "backbone_partially_frozen": True,
+            "frozen_feature_blocks": [1, 2, 3, 4],
+            "trainable_feature_blocks": [VGG16_LAST_CONV_BLOCK],
             "batch_norm_frozen": False,
             "batch_norm_mode_during_training": "train",
             "trainable_component": TRAINABLE_COMPONENT,
@@ -855,7 +889,7 @@ def build_fold_config(
         },
         "optimizer": {
             "name": optimizer.__class__.__name__,
-            "optimized_parameter_scope": "entire_model",
+            "optimized_parameter_scope": TRAINABLE_COMPONENT,
             "initial_learning_rate": optimizer_group["lr"],
             "weight_decay": optimizer_group["weight_decay"],
             "momentum": optimizer_group["momentum"],
@@ -1079,7 +1113,7 @@ def run_fold(fold: int) -> tuple[dict[str, object], pd.DataFrame]:
 
     model = build_model(num_classes)
     optimizer = torch.optim.SGD(
-        model.parameters(),
+        (parameter for parameter in model.parameters() if parameter.requires_grad),
         lr=LEARNING_RATE,
         momentum=MOMENTUM,
         weight_decay=WEIGHT_DECAY,
