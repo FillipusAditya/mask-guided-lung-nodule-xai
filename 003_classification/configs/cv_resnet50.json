@@ -1,7 +1,7 @@
 {
     "experiment": {
-        "id": "a0d90f9e-3dd4-4de0-98af-12858696f613",
-        "component": "classification/baseline_resnet50"
+        "id": "fa028196-fd4c-441f-a5d3-3efb9707e7f9",
+        "component": "classification/cv_resnet50"
     },
     "output": {
         "root_directory": "experiment_results",
@@ -41,14 +41,14 @@
     "model": {
         "architecture": "ResNet50",
         "pretrained_weights": "DEFAULT",
-        "training_strategy": "last_residual_stage_and_classifier_fine_tuning",
-        "trainable_component": "layer4_and_fc",
+        "training_strategy": "full_fine_tuning",
+        "trainable_component": "entire_model",
         "classifier_dropout": 0.3
     },
     "training": {
         "num_epochs": 100,
         "batch_size": 32,
-        "learning_rate": 1e-05,
+        "learning_rate": 0.001,
         "seed": 42,
         "transform_seed": 42,
         "classification_threshold": 0.5,
@@ -61,13 +61,11 @@
         "nesterov": false
     },
     "scheduler": {
-        "enabled": true,
+        "enabled": false,
         "name": "PlateauLearningRateSequence",
         "mode": "min",
         "learning_rates": [
-            1e-05,
-            5e-06,
-            1e-06
+            0.001
         ],
         "patience": 3,
         "threshold": 0.0001,
@@ -76,7 +74,7 @@
     },
     "dataloader": {
         "num_workers": 2,
-        "persistent_workers": false,
+        "persistent_workers": true,
         "prefetch_factor": 2,
         "pin_memory": true,
         "train_shuffle": true,
@@ -88,10 +86,13 @@
         "enabled": true,
         "monitor": "val_loss",
         "mode": "min",
-        "patience": 12,
+        "patience": 20,
         "min_delta": 0.0,
         "verbose": true,
         "restore_best_weights": true
+    },
+    "amp": {
+        "training_enabled": false
     },
     "checkpoint": {
         "save_latest": true

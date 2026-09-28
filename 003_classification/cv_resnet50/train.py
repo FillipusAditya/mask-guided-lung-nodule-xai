@@ -196,13 +196,10 @@ def validate_configuration() -> None:
 
     if MODEL_ARCHITECTURE != "ResNet50":
         raise ValueError("Only architecture='ResNet50' is supported.")
-    if TRAINING_STRATEGY != "last_residual_stage_and_classifier_fine_tuning":
-        raise ValueError(
-            "training_strategy must freeze the ResNet-50 stem and layer1-3, "
-            "then train layer4 and fc."
-        )
-    if TRAINABLE_COMPONENT != "layer4_and_fc":
-        raise ValueError("trainable_component must be layer4_and_fc.")
+    if TRAINING_STRATEGY != "full_fine_tuning":
+        raise ValueError("training_strategy must be full_fine_tuning.")
+    if TRAINABLE_COMPONENT != "entire_model":
+        raise ValueError("trainable_component must be entire_model.")
     if not 0.0 <= CLASSIFIER_DROPOUT < 1.0:
         raise ValueError("classifier_dropout must be in the range [0, 1).")
     if SCHEDULER_NAME != "PlateauLearningRateSequence":
@@ -427,7 +424,7 @@ def assert_fold_isolation(
 # Model and epoch loops
 # ---------------------------------------------------------------------------
 def build_model(num_classes: int) -> nn.Module:
-    """Create ResNet-50 with layer4 and the classifier trainable."""
+    """Create a fully trainable ImageNet-pretrained ResNet-50."""
 
     model = models.resnet50(weights=WEIGHTS)
     input_features = model.fc.in_features
@@ -435,46 +432,23 @@ def build_model(num_classes: int) -> nn.Module:
         nn.Dropout(p=CLASSIFIER_DROPOUT),
         nn.Linear(input_features, num_classes),
     )
-    for parameter in model.parameters():
-        parameter.requires_grad = False
-    for parameter in model.layer4.parameters():
-        parameter.requires_grad = True
-    for parameter in model.fc.parameters():
-        parameter.requires_grad = True
-    assert_expected_trainable_parameters(model)
+    assert_all_parameters_trainable(model)
     return model.to(DEVICE)
 
 
-def assert_expected_trainable_parameters(model: nn.Module) -> None:
-    """Verify that only layer4 and fc are trainable."""
+def assert_all_parameters_trainable(model: nn.Module) -> None:
+    """Verify that full fine-tuning has not left any parameter frozen."""
 
-    incorrectly_trainable = [
+    frozen_parameters = [
         name
         for name, parameter in model.named_parameters()
-        if not name.startswith(("layer4.", "fc.")) and parameter.requires_grad
+        if not parameter.requires_grad
     ]
-    incorrectly_frozen = [
-        name
-        for name, parameter in model.named_parameters()
-        if name.startswith(("layer4.", "fc.")) and not parameter.requires_grad
-    ]
-    if incorrectly_trainable or incorrectly_frozen:
+    if frozen_parameters:
         raise RuntimeError(
-            "Unexpected ResNet-50 freezing policy: "
-            f"incorrectly_trainable={incorrectly_trainable}, "
-            f"incorrectly_frozen={incorrectly_frozen}"
+            "Full fine-tuning requires every parameter to be trainable. "
+            f"Frozen parameters: {frozen_parameters}"
         )
-
-
-def set_frozen_batch_norm_eval(model: nn.Module) -> None:
-    """Keep BatchNorm statistics fixed outside trainable layer4."""
-
-    for module in model.modules():
-        if not isinstance(module, nn.BatchNorm2d):
-            continue
-        parameters = tuple(module.parameters(recurse=False))
-        if parameters and not any(parameter.requires_grad for parameter in parameters):
-            module.eval()
 
 
 class PlateauLearningRateSequence:
@@ -584,7 +558,6 @@ def train_one_epoch(
     """Train the model over all batches once."""
 
     model.train()
-    set_frozen_batch_norm_eval(model)
     running_loss = 0.0
     correct_predictions = 0
     total_samples = 0
@@ -803,19 +776,11 @@ def build_fold_config(
             "pretrained_weights": str(WEIGHTS),
             "num_classes": len(train_dataset.classes),
             "backbone_frozen": False,
-            "backbone_partially_frozen": True,
-            "frozen_components": [
-                "conv1",
-                "bn1",
-                "layer1",
-                "layer2",
-                "layer3",
-            ],
-            "trainable_components": ["layer4", "fc"],
-            "batch_norm_partially_frozen": True,
-            "batch_norm_mode_during_training": (
-                "eval_for_frozen_components_train_for_layer4"
-            ),
+            "backbone_partially_frozen": False,
+            "frozen_components": [],
+            "trainable_components": ["entire_model"],
+            "batch_norm_partially_frozen": False,
+            "batch_norm_mode_during_training": "train",
             "trainable_component": TRAINABLE_COMPONENT,
             "classifier": {
                 "architecture": "dropout_linear",
@@ -1114,7 +1079,7 @@ def run_fold(fold: int) -> tuple[dict[str, object], pd.DataFrame]:
 
     model = build_model(num_classes)
     optimizer = torch.optim.SGD(
-        (parameter for parameter in model.parameters() if parameter.requires_grad),
+        model.parameters(),
         lr=LEARNING_RATE,
         momentum=MOMENTUM,
         weight_decay=WEIGHT_DECAY,
