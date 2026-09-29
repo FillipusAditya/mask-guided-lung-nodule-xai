@@ -37,6 +37,7 @@ from .xai import (
     generate_layerwise_lrp,
     normalize_signed,
     normalize_unsigned,
+    resolve_metadata_path,
     save_study_visualizations,
 )
 
