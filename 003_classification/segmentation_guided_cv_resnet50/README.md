@@ -21,6 +21,14 @@ probability map menerima transform geometris yang sama;
 augmentasi intensitas hanya diterapkan pada CT. Interpolasi linear dipakai
 untuk mempertahankan nilai probability map yang kontinu.
 
+## Workflow end-to-end
+
+![Workflow segmentation-guided classification](../architecture_diagrams/segmentation_guided_classification_workflow.png)
+
+Diagram workflow mencakup persiapan pasangan CT/probability map, transform ke
+`224 x 224`, residual attention setelah `layer3`, training 5-fold, ensemble
+holdout, evaluasi, serta pembuatan Grad-CAM dan LRP.
+
 Setiap fold dijalankan maksimal 100 epoch dengan early stopping berdasarkan
 `val_loss`. Training fold dihentikan setelah 20 epoch berturut-turut tanpa
 penurunan `val_loss`, kemudian bobot dari epoch terbaik dimuat kembali untuk

@@ -1,0 +1,331 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="2250" height="2850" viewBox="0 0 2250 2850" role="img" aria-labelledby="title description">
+  <title id="title">Protected Lung Parenchyma Segmentation V2</title>
+  <desc id="description">Detailed flow diagram from LIDC-IDRI DICOM or LNDb MHD input through protected bidirectional lung-mask segmentation, boundary repair, filtering, windowing, normalization, masking, validation, and output.</desc>
+  <defs>
+    <linearGradient id="background" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#f8fbff"/>
+      <stop offset="1" stop-color="#eef4fa"/>
+    </linearGradient>
+    <linearGradient id="header" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#0b3954"/>
+      <stop offset="1" stop-color="#087e8b"/>
+    </linearGradient>
+    <filter id="shadow" x="-10%" y="-10%" width="120%" height="130%">
+      <feDropShadow dx="0" dy="8" stdDeviation="10" flood-color="#17324d" flood-opacity="0.14"/>
+    </filter>
+    <marker id="arrow" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto" markerUnits="strokeWidth">
+      <path d="M 0 0 L 12 6 L 0 12 z" fill="#43657b"/>
+    </marker>
+    <marker id="arrowBlue" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto" markerUnits="strokeWidth">
+      <path d="M 0 0 L 12 6 L 0 12 z" fill="#1675a9"/>
+    </marker>
+    <style>
+      .title { font: 700 54px 'DejaVu Sans', Arial, sans-serif; fill: white; }
+      .subtitle { font: 400 24px 'DejaVu Sans', Arial, sans-serif; fill: #d9f3f4; letter-spacing: 0.5px; }
+      .stage-number { font: 700 22px 'DejaVu Sans', Arial, sans-serif; fill: white; text-anchor: middle; dominant-baseline: middle; }
+      .stage-title { font: 700 30px 'DejaVu Sans', Arial, sans-serif; fill: #17324d; }
+      .stage-note { font: 400 20px 'DejaVu Sans', Arial, sans-serif; fill: #587184; }
+      .box-title { font: 700 23px 'DejaVu Sans', Arial, sans-serif; fill: #17324d; text-anchor: middle; }
+      .box-text { font: 400 19px 'DejaVu Sans', Arial, sans-serif; fill: #365367; text-anchor: middle; }
+      .small { font: 400 17px 'DejaVu Sans', Arial, sans-serif; fill: #526b7d; text-anchor: middle; }
+      .small-left { font: 400 17px 'DejaVu Sans', Arial, sans-serif; fill: #526b7d; }
+      .tiny { font: 400 15px 'DejaVu Sans', Arial, sans-serif; fill: #526b7d; text-anchor: middle; }
+      .box-title-light { font: 700 23px 'DejaVu Sans', Arial, sans-serif; fill: #ffffff; text-anchor: middle; }
+      .small-light { font: 400 17px 'DejaVu Sans', Arial, sans-serif; fill: #d5e5ee; text-anchor: middle; }
+      .visual-label { font: 700 18px 'DejaVu Sans', Arial, sans-serif; fill: #17324d; text-anchor: middle; }
+      .visual-note { font: 400 15px 'DejaVu Sans', Arial, sans-serif; fill: #587184; text-anchor: middle; }
+      .visual-frame { fill: none; stroke: #6f8798; stroke-width: 3; }
+      .parameter { font: 600 18px 'DejaVu Sans', Arial, sans-serif; fill: #116b77; text-anchor: middle; }
+      .pill { font: 700 17px 'DejaVu Sans', Arial, sans-serif; fill: white; text-anchor: middle; dominant-baseline: middle; }
+      .arrow { fill: none; stroke: #43657b; stroke-width: 4; marker-end: url(#arrow); }
+      .arrow-blue { fill: none; stroke: #1675a9; stroke-width: 4; marker-end: url(#arrowBlue); }
+      .thin-arrow { fill: none; stroke: #7890a1; stroke-width: 3; marker-end: url(#arrow); }
+      .divider { stroke: #d4e0e8; stroke-width: 2; }
+    </style>
+  </defs>
+
+  <rect width="2250" height="2850" fill="url(#background)"/>
+  <rect x="0" y="0" width="2250" height="145" fill="url(#header)"/>
+  <text id="diagram-title" x="1125" y="66" class="title" text-anchor="middle">Protected Lung Parenchyma Segmentation V2</text>
+  <text x="1125" y="110" class="subtitle" text-anchor="middle">Detailed end-to-end processing flow with representative CT visualizations</text>
+
+  <!-- Inputs -->
+  <rect x="90" y="185" width="760" height="190" rx="24" fill="#ffffff" stroke="#9dc7db" stroke-width="3" filter="url(#shadow)"/>
+  <rect x="115" y="210" width="115" height="34" rx="17" fill="#1675a9"/>
+  <text x="172" y="228" class="pill">INPUT A</text>
+  <text x="470" y="263" class="box-title">LIDC-IDRI DICOM Series</text>
+  <text x="470" y="303" class="box-text">Discover local patient series and match pylidc study/series UIDs</text>
+  <text x="470" y="337" class="small">Sort slices by ImagePositionPatient (z); apply RescaleSlope + RescaleIntercept</text>
+
+  <rect x="950" y="185" width="760" height="190" rx="24" fill="#ffffff" stroke="#9dc7db" stroke-width="3" filter="url(#shadow)"/>
+  <rect x="975" y="210" width="115" height="34" rx="17" fill="#1675a9"/>
+  <text x="1032" y="228" class="pill">INPUT B</text>
+  <text x="1330" y="263" class="box-title">LNDb MHD / RAW Volume</text>
+  <text x="1330" y="303" class="box-text">Discover .mhd headers and verify the referenced ElementDataFile payload</text>
+  <text x="1330" y="337" class="small">Load with SimpleITK and convert to axial array order</text>
+
+  <rect x="1780" y="185" width="380" height="190" rx="24" fill="#e9f2f7" stroke="#9dc7db" stroke-width="3" filter="url(#shadow)"/>
+  <text x="1970" y="232" class="box-title">Visualization source</text>
+  <text x="1970" y="271" class="box-text">LIDC-IDRI-0001</text>
+  <text x="1970" y="303" class="small">Series 30178 / 03192 • 133 slices</text>
+  <text x="1970" y="333" class="small">Reference slice index 66</text>
+  <text x="1970" y="357" class="visual-note">Color overlays show retained foreground</text>
+
+  <path d="M 470 375 L 470 415 L 900 415 L 900 453" class="arrow"/>
+  <path d="M 1330 375 L 1330 415 L 900 415" fill="none" stroke="#43657b" stroke-width="4"/>
+
+  <!-- Stage 1 -->
+  <rect x="90" y="460" width="2070" height="205" rx="28" fill="#ffffff" stroke="#b9ccd9" stroke-width="3" filter="url(#shadow)"/>
+  <circle cx="140" cy="512" r="29" fill="#0b7285"/>
+  <text x="140" y="513" class="stage-number">1</text>
+  <text x="190" y="520" class="stage-title">Load and validate the CT volume</text>
+  <text x="190" y="554" class="stage-note">Create one common in-memory representation before segmentation.</text>
+  <rect x="220" y="583" width="430" height="53" rx="12" fill="#e9f6fa" stroke="#91c4d4" stroke-width="2"/>
+  <text x="435" y="616" class="box-text">Shape: (slices, height, width)</text>
+  <rect x="685" y="583" width="430" height="53" rx="12" fill="#e9f6fa" stroke="#91c4d4" stroke-width="2"/>
+  <text x="900" y="616" class="box-text">CT values: int16 Hounsfield Units</text>
+  <rect x="1150" y="583" width="430" height="53" rx="12" fill="#e9f6fa" stroke="#91c4d4" stroke-width="2"/>
+  <text x="1365" y="616" class="box-text">Reject invalid or undersized volumes</text>
+  <line x1="1755" y1="480" x2="1755" y2="645" class="divider"/>
+  <image href="pipeline_visuals/original_ct.png" x="1790" y="480" width="165" height="165" preserveAspectRatio="xMidYMid slice"/>
+  <rect x="1790" y="480" width="165" height="165" rx="10" class="visual-frame"/>
+  <text x="2055" y="536" class="visual-label">Original axial CT</text>
+  <text x="2055" y="571" class="visual-note">Lung-window display</text>
+  <text x="2055" y="598" class="visual-note">Stored values remain HU</text>
+
+  <path d="M 900 665 L 900 718" class="arrow"/>
+
+  <!-- Stage 2 -->
+  <rect x="90" y="725" width="2070" height="360" rx="28" fill="#ffffff" stroke="#b9ccd9" stroke-width="3" filter="url(#shadow)"/>
+  <circle cx="140" cy="777" r="29" fill="#0b7285"/>
+  <text x="140" y="778" class="stage-number">2</text>
+  <text x="190" y="785" class="stage-title">Build a sensitive candidate mask for every axial slice</text>
+  <text x="190" y="819" class="stage-note">The same candidate buffer is later reused during propagation to limit peak memory.</text>
+
+  <rect x="130" y="865" width="260" height="145" rx="18" fill="#f2f9fc" stroke="#84b8cf" stroke-width="3"/>
+  <text x="260" y="910" class="box-title">HU threshold</text>
+  <text x="260" y="947" class="parameter">image &lt; -320 HU</text>
+  <text x="260" y="978" class="tiny">Air-rich regions become</text>
+  <text x="260" y="999" class="tiny">candidate foreground</text>
+
+  <path d="M 390 937 L 430 937" class="thin-arrow"/>
+  <rect x="430" y="865" width="260" height="145" rx="18" fill="#f2f9fc" stroke="#84b8cf" stroke-width="3"/>
+  <text x="560" y="910" class="box-title">Clear border</text>
+  <text x="560" y="947" class="small">Remove components touching</text>
+  <text x="560" y="976" class="small">the image boundary</text>
+
+  <path d="M 690 937 L 730 937" class="thin-arrow"/>
+  <rect x="730" y="865" width="300" height="145" rx="18" fill="#f2f9fc" stroke="#84b8cf" stroke-width="3"/>
+  <text x="880" y="900" class="box-title">Remove CT table</text>
+  <text x="880" y="937" class="tiny">Lower centroid &gt; 70% height</text>
+  <text x="880" y="965" class="tiny">Width &gt; 40%; height/width &lt; 0.35</text>
+  <text x="880" y="993" class="tiny">Only wide, flat geometry is removed</text>
+
+  <path d="M 1030 937 L 1070 937" class="thin-arrow"/>
+  <rect x="1070" y="865" width="260" height="145" rx="18" fill="#f2f9fc" stroke="#84b8cf" stroke-width="3"/>
+  <text x="1200" y="910" class="box-title">Keep components</text>
+  <text x="1200" y="947" class="parameter">4 largest regions</text>
+  <text x="1200" y="978" class="tiny">Suppress small isolated</text>
+  <text x="1200" y="999" class="tiny">artifacts</text>
+
+  <path d="M 1330 937 L 1370 937" class="thin-arrow"/>
+  <rect x="1370" y="865" width="300" height="145" rx="18" fill="#f2f9fc" stroke="#84b8cf" stroke-width="3"/>
+  <text x="1520" y="910" class="box-title">Fill holes</text>
+  <text x="1520" y="947" class="box-text">Binary hole filling</text>
+  <text x="1520" y="980" class="tiny">Output: uint8 candidate volume</text>
+  <line x1="1755" y1="750" x2="1755" y2="1060" class="divider"/>
+  <image href="pipeline_visuals/threshold_overlay.png" x="1790" y="790" width="165" height="165" preserveAspectRatio="xMidYMid slice"/>
+  <rect x="1790" y="790" width="165" height="165" rx="10" class="visual-frame"/>
+  <text x="1872" y="982" class="visual-label">Threshold</text>
+  <text x="1872" y="1008" class="visual-note">Cyan: HU &lt; -320</text>
+  <image href="pipeline_visuals/candidate_overlay.png" x="1970" y="790" width="165" height="165" preserveAspectRatio="xMidYMid slice"/>
+  <rect x="1970" y="790" width="165" height="165" rx="10" class="visual-frame"/>
+  <text x="2052" y="982" class="visual-label">Candidate mask</text>
+  <text x="2052" y="1008" class="visual-note">Teal: cleaned candidate</text>
+
+  <path d="M 900 1085 L 900 1138" class="arrow"/>
+
+  <!-- Stage 3 -->
+  <rect x="90" y="1145" width="2070" height="380" rx="28" fill="#ffffff" stroke="#b9ccd9" stroke-width="3" filter="url(#shadow)"/>
+  <circle cx="140" cy="1197" r="29" fill="#6554c0"/>
+  <text x="140" y="1198" class="stage-number">3</text>
+  <text x="190" y="1205" class="stage-title">Select and clean a reliable reference slice</text>
+  <text x="190" y="1239" class="stage-note">Search outward from the middle slice; prefer the nearest clean slice containing substantial left and right lungs.</text>
+
+  <rect x="135" y="1285" width="300" height="160" rx="18" fill="#f5f2ff" stroke="#a99be1" stroke-width="3"/>
+  <text x="285" y="1328" class="box-title">Middle-out search</text>
+  <text x="285" y="1365" class="box-text">Order slices by distance</text>
+  <text x="285" y="1395" class="box-text">from volume midpoint</text>
+  <text x="285" y="1423" class="tiny">Fallback: nearest non-empty</text>
+  <text x="285" y="1444" class="tiny">clean mask</text>
+
+  <path d="M 435 1365 L 480 1365" class="thin-arrow"/>
+  <rect x="480" y="1270" width="560" height="195" rx="18" fill="#f5f2ff" stroke="#a99be1" stroke-width="3"/>
+  <text x="760" y="1310" class="box-title">Clean each reference candidate</text>
+  <text x="520" y="1351" class="small-left">1. Remove wide/flat table geometry</text>
+  <text x="520" y="1381" class="small-left">2. Remove small peripheral components (&lt; 2% image area)</text>
+  <text x="520" y="1411" class="small-left">3. Remove small central anterior trachea (&lt; 0.69% image area)</text>
+  <text x="520" y="1441" class="small-left">4. Keep two largest components and fill holes</text>
+
+  <path d="M 1040 1365 L 1085 1365" class="thin-arrow"/>
+  <polygon points="1235,1275 1385,1365 1235,1455 1085,1365" fill="#fff8e8" stroke="#d4a742" stroke-width="3"/>
+  <text x="1235" y="1347" class="box-title">Bilateral?</text>
+  <text x="1235" y="1381" class="small">Component ≥ 1% area</text>
+  <text x="1235" y="1407" class="small">on both image halves</text>
+
+  <path d="M 1385 1365 L 1430 1365" class="arrow-blue"/>
+  <text x="1408" y="1345" class="parameter">YES</text>
+  <rect x="1430" y="1285" width="240" height="160" rx="18" fill="#eaf8f2" stroke="#5eb593" stroke-width="3"/>
+  <text x="1550" y="1330" class="box-title">Clean reference</text>
+  <text x="1550" y="1367" class="box-text">Seed for protected</text>
+  <text x="1550" y="1397" class="box-text">propagation</text>
+  <text x="1550" y="1427" class="small">Store reference index</text>
+
+  <path d="M 1235 1455 L 1235 1493 L 285 1493 L 285 1445" fill="none" stroke="#b58024" stroke-width="3" stroke-dasharray="10 8" marker-end="url(#arrow)"/>
+  <text x="760" y="1514" class="small">NO — evaluate the next closest slice</text>
+  <line x1="1755" y1="1170" x2="1755" y2="1500" class="divider"/>
+  <image href="pipeline_visuals/clean_reference_overlay.png" x="1830" y="1200" width="255" height="255" preserveAspectRatio="xMidYMid slice"/>
+  <rect x="1830" y="1200" width="255" height="255" rx="12" class="visual-frame"/>
+  <text x="1957" y="1483" class="visual-label">Clean bilateral reference</text>
+  <text x="1957" y="1508" class="visual-note">Purple: two protected lung regions</text>
+
+  <path d="M 900 1525 L 900 1578" class="arrow"/>
+
+  <!-- Stage 4 -->
+  <rect x="90" y="1585" width="2070" height="405" rx="28" fill="#ffffff" stroke="#b9ccd9" stroke-width="3" filter="url(#shadow)"/>
+  <circle cx="140" cy="1637" r="29" fill="#6554c0"/>
+  <text x="140" y="1638" class="stage-number">4</text>
+  <text x="190" y="1645" class="stage-title">Propagate the protected reference bidirectionally</text>
+  <text x="190" y="1679" class="stage-note">Process slices toward both volume ends while retaining the last valid mask as the reference.</text>
+
+  <rect x="125" y="1735" width="280" height="178" rx="18" fill="#f5f2ff" stroke="#a99be1" stroke-width="3"/>
+  <text x="265" y="1777" class="box-title">Two passes</text>
+  <text x="265" y="1817" class="box-text">Reference → slice 0</text>
+  <text x="265" y="1850" class="box-text">Reference → last slice</text>
+  <text x="265" y="1883" class="tiny">Reset to the clean reference</text>
+  <text x="265" y="1907" class="tiny">before the second direction</text>
+
+  <path d="M 405 1824 L 450 1824" class="thin-arrow"/>
+  <rect x="450" y="1735" width="300" height="178" rx="18" fill="#f5f2ff" stroke="#a99be1" stroke-width="3"/>
+  <text x="600" y="1777" class="box-title">Dilate support</text>
+  <text x="600" y="1817" class="box-text">Expand the last valid mask</text>
+  <text x="600" y="1852" class="parameter">3 → 6 → 10 → 15 pixels</text>
+  <text x="600" y="1883" class="tiny">Stop at the first schedule value</text>
+  <text x="600" y="1907" class="tiny">that produces a valid seed</text>
+
+  <path d="M 750 1824 L 795 1824" class="thin-arrow"/>
+  <rect x="795" y="1735" width="330" height="178" rx="18" fill="#f5f2ff" stroke="#a99be1" stroke-width="3"/>
+  <text x="960" y="1777" class="box-title">Match components</text>
+  <text x="960" y="1817" class="box-text">Candidate component ∩ support</text>
+  <text x="960" y="1852" class="parameter">Required overlap ≥ 10 pixels</text>
+  <text x="960" y="1883" class="tiny">Retain every component meeting</text>
+  <text x="960" y="1907" class="tiny">the protected-overlap criterion</text>
+
+  <path d="M 1125 1824 L 1170 1824" class="thin-arrow"/>
+  <rect x="1170" y="1735" width="250" height="178" rx="18" fill="#eaf8f2" stroke="#5eb593" stroke-width="3"/>
+  <text x="1295" y="1777" class="box-title">If matched</text>
+  <text x="1295" y="1817" class="box-text">Binary propagation</text>
+  <text x="1295" y="1850" class="box-text">inside matched regions</text>
+  <text x="1295" y="1883" class="tiny">Fill holes and update</text>
+  <text x="1295" y="1907" class="tiny">last valid reference</text>
+
+  <path d="M 1420 1824 L 1465 1824" class="thin-arrow"/>
+  <rect x="1465" y="1735" width="205" height="178" rx="18" fill="#fff1f0" stroke="#d98279" stroke-width="3"/>
+  <text x="1567" y="1777" class="box-title">If failed</text>
+  <text x="1567" y="1817" class="box-text">Write empty mask</text>
+  <text x="1567" y="1850" class="box-text">Record slice index</text>
+  <text x="1567" y="1883" class="tiny">Do not replace the</text>
+  <text x="1567" y="1907" class="tiny">last valid reference</text>
+  <line x1="1755" y1="1610" x2="1755" y2="1965" class="divider"/>
+  <image href="pipeline_visuals/propagated_overlay.png" x="1830" y="1640" width="255" height="255" preserveAspectRatio="xMidYMid slice"/>
+  <rect x="1830" y="1640" width="255" height="255" rx="12" class="visual-frame"/>
+  <text x="1957" y="1923" class="visual-label">Propagated slice</text>
+  <text x="1957" y="1948" class="visual-note">Purple: overlap-protected result</text>
+
+  <path d="M 900 1990 L 900 2043" class="arrow"/>
+
+  <!-- Stage 5 -->
+  <rect x="90" y="2050" width="2070" height="245" rx="28" fill="#ffffff" stroke="#b9ccd9" stroke-width="3" filter="url(#shadow)"/>
+  <circle cx="140" cy="2102" r="29" fill="#c07120"/>
+  <text x="140" y="2103" class="stage-number">5</text>
+  <text x="190" y="2110" class="stage-title">Finalize and repair the lung mask</text>
+  <text x="190" y="2144" class="stage-note">Apply conservative cleanup independently to every propagated axial slice.</text>
+
+  <rect x="180" y="2180" width="350" height="75" rx="15" fill="#fff8e8" stroke="#d9ad55" stroke-width="3"/>
+  <text x="355" y="2212" class="box-title">Residual trachea removal</text>
+  <text x="355" y="2242" class="small">Small + central + anterior only</text>
+  <path d="M 530 2218 L 575 2218" class="thin-arrow"/>
+  <rect x="575" y="2180" width="460" height="75" rx="15" fill="#fff8e8" stroke="#d9ad55" stroke-width="3"/>
+  <text x="805" y="2212" class="box-title">Per-component boundary repair</text>
+  <text x="805" y="2242" class="small">Binary closing with disk radius 16 in a padded crop</text>
+  <path d="M 1035 2218 L 1080 2218" class="thin-arrow"/>
+  <rect x="1080" y="2180" width="300" height="75" rx="15" fill="#fff8e8" stroke="#d9ad55" stroke-width="3"/>
+  <text x="1230" y="2212" class="box-title">Fill repaired holes</text>
+  <text x="1230" y="2242" class="small">Merge all repaired components</text>
+  <path d="M 1380 2218 L 1425 2218" class="thin-arrow"/>
+  <rect x="1425" y="2180" width="210" height="75" rx="15" fill="#eaf8f2" stroke="#5eb593" stroke-width="3"/>
+  <text x="1530" y="2212" class="box-title">Final mask</text>
+  <text x="1530" y="2242" class="parameter">uint8: {0, 1}</text>
+  <line x1="1755" y1="2070" x2="1755" y2="2275" class="divider"/>
+  <image href="pipeline_visuals/final_mask_overlay.png" x="1805" y="2080" width="185" height="185" preserveAspectRatio="xMidYMid slice"/>
+  <rect x="1805" y="2080" width="185" height="185" rx="10" class="visual-frame"/>
+  <text x="2072" y="2140" class="visual-label">Final lung mask</text>
+  <text x="2072" y="2175" class="visual-note">Orange overlay</text>
+  <text x="2072" y="2202" class="visual-note">Repaired + filled</text>
+
+  <path d="M 900 2295 L 900 2348" class="arrow"/>
+
+  <!-- Stage 6 -->
+  <rect x="90" y="2355" width="2070" height="275" rx="28" fill="#ffffff" stroke="#b9ccd9" stroke-width="3" filter="url(#shadow)"/>
+  <circle cx="140" cy="2407" r="29" fill="#c07120"/>
+  <text x="140" y="2408" class="stage-number">6</text>
+  <text x="190" y="2415" class="stage-title">Create normalized lung parenchyma</text>
+  <text x="190" y="2449" class="stage-note">Process one slice at a time; use the original HU volume and the final binary mask.</text>
+
+  <rect x="125" y="2490" width="280" height="95" rx="16" fill="#fff8e8" stroke="#d9ad55" stroke-width="3"/>
+  <text x="265" y="2526" class="box-title">Median filter</text>
+  <text x="265" y="2561" class="parameter">3 × 3 in-plane only</text>
+  <path d="M 405 2538 L 450 2538" class="thin-arrow"/>
+  <rect x="450" y="2490" width="300" height="95" rx="16" fill="#fff8e8" stroke="#d9ad55" stroke-width="3"/>
+  <text x="600" y="2526" class="box-title">Lung window</text>
+  <text x="600" y="2561" class="parameter">Clip to [-1400, 200] HU</text>
+  <path d="M 750 2538 L 795 2538" class="thin-arrow"/>
+  <rect x="795" y="2490" width="330" height="95" rx="16" fill="#fff8e8" stroke="#d9ad55" stroke-width="3"/>
+  <text x="960" y="2526" class="box-title">Normalize to [0, 1]</text>
+  <text x="960" y="2561" class="parameter">(HU + 1400) / 1600</text>
+  <path d="M 1125 2538 L 1170 2538" class="thin-arrow"/>
+  <rect x="1170" y="2490" width="300" height="95" rx="16" fill="#fff8e8" stroke="#d9ad55" stroke-width="3"/>
+  <text x="1320" y="2526" class="box-title">Apply final mask</text>
+  <text x="1320" y="2561" class="small">Set all outside pixels to 0.0</text>
+  <path d="M 1470 2538 L 1515 2538" class="thin-arrow"/>
+  <rect x="1515" y="2490" width="155" height="95" rx="16" fill="#eaf8f2" stroke="#5eb593" stroke-width="3"/>
+  <text x="1592" y="2526" class="box-title">Result</text>
+  <text x="1592" y="2561" class="parameter">float32</text>
+  <line x1="1755" y1="2375" x2="1755" y2="2610" class="divider"/>
+  <image href="pipeline_visuals/filtered_windowed_ct.png" x="1790" y="2410" width="165" height="165" preserveAspectRatio="xMidYMid slice"/>
+  <rect x="1790" y="2410" width="165" height="165" rx="10" class="visual-frame"/>
+  <text x="1872" y="2602" class="visual-label">Filtered CT</text>
+  <image href="pipeline_visuals/segmented_parenchyma.png" x="1970" y="2410" width="165" height="165" preserveAspectRatio="xMidYMid slice"/>
+  <rect x="1970" y="2410" width="165" height="165" rx="10" class="visual-frame"/>
+  <text x="2052" y="2602" class="visual-label">Parenchyma</text>
+
+  <path d="M 900 2630 L 900 2673" class="arrow"/>
+
+  <!-- Outputs -->
+  <rect x="90" y="2680" width="2070" height="130" rx="26" style="fill:#17324d"/>
+  <text x="180" y="2728" class="stage-number" text-anchor="start">OUTPUTS</text>
+  <line x1="345" y1="2705" x2="345" y2="2785" stroke="#587a91" stroke-width="2"/>
+  <text x="535" y="2729" class="box-title-light">Binary lung mask</text>
+  <text x="535" y="2764" class="small-light">Same shape; uint8; values 0 or 1</text>
+  <line x1="730" y1="2705" x2="730" y2="2785" stroke="#587a91" stroke-width="2"/>
+  <text x="965" y="2729" class="box-title-light">Segmented parenchyma</text>
+  <text x="965" y="2764" class="small-light">Same shape; float32; range [0, 1]</text>
+  <line x1="1200" y1="2705" x2="1200" y2="2785" stroke="#587a91" stroke-width="2"/>
+  <text x="1440" y="2729" class="box-title-light">Diagnostics + reports</text>
+  <text x="1440" y="2764" class="small-light">Reference, failures, extent, fraction, Dice</text>
+  <line x1="1710" y1="2705" x2="1710" y2="2785" stroke="#587a91" stroke-width="2"/>
+  <text x="1935" y="2729" class="box-title-light">Representative CT views</text>
+  <text x="1935" y="2764" class="small-light">Generated directly from the implemented pipeline</text>
+
+  <text x="1125" y="2840" class="small">Validation: matching shapes • finite values • valid dtypes/ranges • zero background outside the final mask</text>
+</svg>

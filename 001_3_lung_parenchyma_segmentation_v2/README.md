@@ -11,6 +11,11 @@ separate quality-control PNG files by `quality_control.py`.
 
 ## Processing workflow
 
+![Detailed lung parenchyma segmentation pipeline with representative CT visualizations](lung_parenchyma_segmentation_pipeline.png)
+
+The diagram above follows the implemented V2 data flow, including the protected
+reference propagation, fallback behavior, mask repair, and output validation.
+
 ```text
 Original CT in Hounsfield Units
 ├── candidate masks for every slice
@@ -38,6 +43,8 @@ Original CT in Hounsfield Units
 | File | Responsibility |
 |---|---|
 | `step_by_step_process.ipynb` | Detailed explanation and visualizations. |
+| `penjelasan_lengkap_lung_parenchyma_segmentation.txt` | Complete Indonesian step-by-step explanation of the implemented pipeline. |
+| `lung_parenchyma_segmentation_pipeline.png` | Detailed process diagram with representative CT visualizations. |
 | `config.py` | Input paths, output paths, and processing parameters. |
 | `step_1_ct_to_numpy.py` | Discover and load complete DICOM/MHD studies. |
 | `step_2_segmentation.py` | Protected bidirectional segmentation and repair. |

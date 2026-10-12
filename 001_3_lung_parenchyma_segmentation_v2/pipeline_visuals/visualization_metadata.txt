@@ -1,0 +1,6 @@
+Patient: LIDC-IDRI-0001
+Series: 30178/03192
+Slices: 133
+Reference index: 66
+Propagation example index: 74
+Threshold: -320 HU

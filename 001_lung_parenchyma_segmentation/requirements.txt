@@ -1,5 +1,0 @@
-numpy
-pylidc
-scipy
-SimpleITK
-scikit-image

@@ -34,11 +34,17 @@ Thumbs.db
 
 # Dataset
 000_dataset/
+000_dataset_v2/
+dataset_gcolab/
 
 # Result
 002_segmentation/*/result_*/
 classification
 classification_results
+segmentation_results
+experiment_results/
 
 # txt
 small_notes.txt
+
+dataset_gcolab.tar.gz

@@ -3,7 +3,8 @@
 Example
 -------
 python 002_segmentation/unet_holdout/test.py \
-    experiment_results/dc730a13-5813-4d87-b15c-3b630deb32b5/segmentation/unet
+    experiment_results/dc730a13-5813-4d87-b15c-3b630deb32b5/segmentation/unet \
+    --dataset-root 000_dataset_v2/_segmentation_dataset
 """
 
 from __future__ import annotations
@@ -51,6 +52,7 @@ from unet_utils import (  # noqa: E402
 from unet_utils.dataset import LungDataset  # noqa: E402
 
 METRIC_NAMES = ("dice", "iou", "precision", "sensitivity", "specificity")
+CSV_FLOAT_FORMAT = "%.17g"
 METRIC_LABELS = {
     "dice": "Dice",
     "iou": "IoU",
@@ -88,6 +90,50 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=None,
         help="Inference output directory (default: <result_dir>/inference).",
+    )
+    parser.add_argument(
+        "--dataset-root",
+        type=Path,
+        default=None,
+        help=(
+            "Dataset root override. Use this when the saved run configuration "
+            "contains a Colab-only path such as /content/... ."
+        ),
+    )
+    parser.add_argument(
+        "--splits",
+        nargs="+",
+        choices=("train", "val", "test"),
+        default=("train", "val", "test"),
+        help=(
+            "Dataset splits to process (default: train val test). "
+            "Use '--splits test' for held-out evaluation only."
+        ),
+    )
+    parser.add_argument(
+        "--tile-chunk-size",
+        type=int,
+        default=None,
+        help=(
+            "Maximum flattened tiles per forward pass. Overrides the saved "
+            "training value; a smaller value reduces accelerator memory."
+        ),
+    )
+    parser.add_argument(
+        "--skip-visualizations",
+        action="store_true",
+        help=(
+            "Skip per-study PNG canvases. Probability arrays, masks, and "
+            "selected-split metrics summaries are still exported."
+        ),
+    )
+    parser.add_argument(
+        "--visualizations-only",
+        action="store_true",
+        help=(
+            "Export per-study PNG canvases and selected-split metrics summaries "
+            "without saving probability or binary-mask arrays."
+        ),
     )
     parser.add_argument(
         "--batch-size",
@@ -201,12 +247,23 @@ def create_split_data(
     batch_size: int,
     num_workers: int | None,
     max_samples: int | None,
+    dataset_root_override: Path | None = None,
 ) -> tuple[DataLoader, pd.DataFrame]:
     """Build a deterministic loader and aligned metadata for one dataset split."""
 
     data_config = config["data"]
     loader_config = config["dataloader"]
-    dataset_root = resolve_from_project(data_config["dataset_root"])
+    dataset_root = (
+        resolve_from_project(dataset_root_override)
+        if dataset_root_override is not None
+        else resolve_from_project(data_config["dataset_root"])
+    )
+    if not dataset_root.is_dir():
+        raise FileNotFoundError(
+            f"Dataset root not found: {dataset_root}. "
+            "If this run was trained in Colab, pass the local path with "
+            "--dataset-root."
+        )
     transform = A.Compose(
         [
             A.Resize(
@@ -917,6 +974,57 @@ def aggregate_metrics(
     return overall, per_class
 
 
+def save_metrics_csv(
+    split_results_by_name: dict[
+        str,
+        tuple[pd.DataFrame, dict[str, Any], list[dict[str, Any]], float],
+    ],
+    output_dir: Path,
+) -> None:
+    """Export full-precision overall, per-class, and per-scan metrics."""
+
+    metrics_dir = output_dir / "metrics_csv"
+    metrics_dir.mkdir(parents=True, exist_ok=True)
+    overall_rows: list[dict[str, Any]] = []
+
+    for split, split_results in split_results_by_name.items():
+        per_scan, overall, per_class, average_loss = split_results
+        overall_row: dict[str, Any] = {
+            "split": split,
+            "samples": len(per_scan),
+            "loss": average_loss,
+        }
+        for metric_name in METRIC_NAMES:
+            overall_row[metric_name] = overall[metric_name]
+        for count_name in ("tp", "fp", "tn", "fn"):
+            overall_row[count_name] = int(overall[count_name])
+        for metric_name in METRIC_NAMES:
+            overall_row[f"mean_scan_{metric_name}"] = per_scan[metric_name].mean()
+        overall_rows.append(overall_row)
+
+        per_scan_export = per_scan.copy()
+        per_scan_export.insert(0, "split", split)
+        per_scan_export.to_csv(
+            metrics_dir / f"{split}_per_scan.csv",
+            index=False,
+            float_format=CSV_FLOAT_FORMAT,
+        )
+
+        per_class_export = pd.DataFrame.from_records(per_class)
+        per_class_export.insert(0, "split", split)
+        per_class_export.to_csv(
+            metrics_dir / f"{split}_per_class.csv",
+            index=False,
+            float_format=CSV_FLOAT_FORMAT,
+        )
+
+    pd.DataFrame.from_records(overall_rows).to_csv(
+        metrics_dir / "overall.csv",
+        index=False,
+        float_format=CSV_FLOAT_FORMAT,
+    )
+
+
 def add_bar_labels(axis: plt.Axes, bars: Any) -> None:
     """Annotate metric bars with compact values."""
 
@@ -939,6 +1047,7 @@ def save_metrics_plot(
     per_scan: pd.DataFrame,
     save_path: Path,
     dpi: int,
+    split: str,
 ) -> None:
     """Save a clean summary plot of global, class, and scan-level metrics."""
 
@@ -1012,17 +1121,24 @@ def run_inference(
     tile_overlap: int,
     tile_blend_mode: str,
     output_size: tuple[int, int],
+    parallel_tile_processing: bool,
+    tile_chunk_size: int | None,
+    non_blocking_transfer: bool,
     probability_npy_dir: Path,
     visualization_dir: Path,
     mask_dir: Path,
     dpi: int,
     split: str,
+    save_visualizations: bool,
+    save_arrays: bool,
 ) -> tuple[pd.DataFrame, dict[str, float], list[dict[str, Any]], float]:
     """Run inference and write probability maps, masks, and five-panel canvases."""
 
-    probability_npy_dir.mkdir(parents=True, exist_ok=True)
-    visualization_dir.mkdir(parents=True, exist_ok=True)
-    mask_dir.mkdir(parents=True, exist_ok=True)
+    if save_arrays:
+        probability_npy_dir.mkdir(parents=True, exist_ok=True)
+        mask_dir.mkdir(parents=True, exist_ok=True)
+    if save_visualizations:
+        visualization_dir.mkdir(parents=True, exist_ok=True)
 
     criterion = IoULoss()
     records: list[dict[str, Any]] = []
@@ -1044,14 +1160,18 @@ def run_inference(
         desc=f"{split.capitalize()} study canvases",
         unit="study",
         file=sys.stdout,
-        disable=False,
+        disable=not save_visualizations,
         dynamic_ncols=True,
     )
 
     def flush_study_canvas() -> None:
         """Write the completed current study and release its image arrays."""
 
-        if current_study_id is None or not current_study_slices:
+        if (
+            not save_visualizations
+            or current_study_id is None
+            or not current_study_slices
+        ):
             return
         study_metrics, _ = aggregate_metrics(current_study_records)
         save_sectioned_study_canvas(
@@ -1075,26 +1195,64 @@ def run_inference(
     with torch.inference_mode():
         for images, masks in inference_progress:
             batch_size, num_tiles = images.shape[:2]
-            logit_tiles = []
-            for tile_index in range(num_tiles):
-                image_tiles = images[:, tile_index].to(device, non_blocking=True)
-                with torch.amp.autocast(device_type=device.type, enabled=amp_enabled):
-                    tile_logits = model(image_tiles)
-                logit_tiles.append(tile_logits.float().cpu())
+
+            device_images = images.to(
+                device,
+                non_blocking=non_blocking_transfer,
+            )
+            if parallel_tile_processing:
+                _, _, channels, tile_height, tile_width = device_images.shape
+                flattened_tiles = device_images.reshape(
+                    batch_size * num_tiles,
+                    channels,
+                    tile_height,
+                    tile_width,
+                )
+                chunk_size = tile_chunk_size or flattened_tiles.size(0)
+                logit_chunks = []
+                for image_tiles in flattened_tiles.split(chunk_size, dim=0):
+                    with torch.amp.autocast(
+                        device_type=device.type,
+                        enabled=amp_enabled,
+                    ):
+                        logit_chunks.append(model(image_tiles).float().cpu())
+                flattened_logits = torch.cat(logit_chunks, dim=0)
+                logit_tiles = flattened_logits.reshape(
+                    batch_size,
+                    num_tiles,
+                    *flattened_logits.shape[1:],
+                )
+            else:
+                sequential_logits = []
+                for tile_index in range(num_tiles):
+                    image_tiles = device_images[:, tile_index]
+                    with torch.amp.autocast(
+                        device_type=device.type,
+                        enabled=amp_enabled,
+                    ):
+                        tile_logits = model(image_tiles)
+                    sequential_logits.append(tile_logits.float().cpu())
+                logit_tiles = torch.stack(sequential_logits, dim=1)
+
+            del device_images
 
             logits = merge_tiles(
-                torch.stack(logit_tiles, dim=1),
+                logit_tiles,
                 grid_size=tile_grid_size,
                 overlap=tile_overlap,
                 output_size=output_size,
                 blend_mode=tile_blend_mode,
             )
-            full_images = merge_tiles(
-                images,
-                grid_size=tile_grid_size,
-                overlap=tile_overlap,
-                output_size=output_size,
-                blend_mode=tile_blend_mode,
+            full_images = (
+                merge_tiles(
+                    images,
+                    grid_size=tile_grid_size,
+                    overlap=tile_overlap,
+                    output_size=output_size,
+                    blend_mode=tile_blend_mode,
+                )
+                if save_visualizations
+                else None
             )
             targets = (
                 merge_tiles(
@@ -1155,19 +1313,26 @@ def run_inference(
                     .numpy()
                     .astype(np.float32, copy=False)
                 )
-                np.save(
-                    probability_npy_dir / filename,
-                    probability_array,
-                    allow_pickle=False,
-                )
+                if save_arrays:
+                    np.save(
+                        probability_npy_dir / filename,
+                        probability_array,
+                        allow_pickle=False,
+                    )
                 prediction_array = (
                     prediction.squeeze().numpy().astype(np.uint8, copy=False)
                 )
-                np.save(mask_dir / filename, prediction_array, allow_pickle=False)
+                if save_arrays:
+                    np.save(mask_dir / filename, prediction_array, allow_pickle=False)
+
+                if not save_visualizations:
+                    sample_index += 1
+                    continue
 
                 # Retain every slice so each study canvas shows the complete set,
                 # rather than only the largest-mask representative slice.
                 slice_match = re.search(r"_slice_(\d+)$", scan_id)
+                assert full_images is not None
                 current_study_slices.append(
                     {
                         "study_id": study_id,
@@ -1218,9 +1383,21 @@ def main() -> None:
         raise ValueError("--batch-size must be greater than zero.")
     if args.dpi <= 0:
         raise ValueError("--dpi must be greater than zero.")
+    if args.tile_chunk_size is not None and args.tile_chunk_size <= 0:
+        raise ValueError("--tile-chunk-size must be greater than zero.")
+    if args.skip_visualizations and args.visualizations_only:
+        raise ValueError(
+            "--skip-visualizations and --visualizations-only cannot be used "
+            "together."
+        )
 
     result_dir = resolve_from_project(args.result_dir).resolve()
     config, _ = load_run_config(result_dir)
+    dataset_root_override = (
+        resolve_from_project(args.dataset_root).resolve()
+        if args.dataset_root is not None
+        else None
+    )
     if args.checkpoint is not None:
         checkpoint_path = resolve_from_project(args.checkpoint).resolve()
     else:
@@ -1253,7 +1430,7 @@ def main() -> None:
     visualization_root = output_dir / "visualization"
     mask_root = output_dir / "mask"
 
-    test_results = None
+    split_results_by_name = {}
     data_config = config["data"]
     tile_grid_size = int(data_config["tile_grid_size"])
     tile_overlap = int(data_config.get("tile_overlap", 0))
@@ -1262,14 +1439,32 @@ def main() -> None:
         int(data_config["input_height"]),
         int(data_config["input_width"]),
     )
+    training_config = config["training"]
+    parallel_tile_processing = bool(
+        training_config.get("parallel_tile_processing", False)
+    )
+    configured_chunk_size = (
+        args.tile_chunk_size
+        if args.tile_chunk_size is not None
+        else training_config.get("tile_chunk_size")
+    )
+    tile_chunk_size = (
+        None if configured_chunk_size is None else int(configured_chunk_size)
+    )
+    if tile_chunk_size is not None and tile_chunk_size <= 0:
+        raise ValueError("Configured tile_chunk_size must be positive or null.")
+    non_blocking_transfer = bool(
+        training_config.get("non_blocking_transfer", False)
+    )
     seen_probability_filenames: set[str] = set()
-    for split in ("train", "val", "test"):
+    for split in dict.fromkeys(args.splits):
         loader, metadata = create_split_data(
             config=config,
             split=split,
             batch_size=args.batch_size,
             num_workers=args.num_workers,
             max_samples=args.max_samples,
+            dataset_root_override=dataset_root_override,
         )
         split_filenames = {
             Path(str(filename)).name for filename in metadata["filename"]
@@ -1293,31 +1488,52 @@ def main() -> None:
             tile_overlap=tile_overlap,
             tile_blend_mode=tile_blend_mode,
             output_size=output_size,
+            parallel_tile_processing=parallel_tile_processing,
+            tile_chunk_size=tile_chunk_size,
+            non_blocking_transfer=non_blocking_transfer,
             probability_npy_dir=probability_npy_dir,
             visualization_dir=visualization_root / output_group,
             mask_dir=mask_root / output_group,
             dpi=args.dpi,
             split=split,
+            save_visualizations=not args.skip_visualizations,
+            save_arrays=not args.visualizations_only,
         )
-        if split == "test":
-            test_results = split_results
+        split_results_by_name[split] = split_results
 
-    if test_results is None:
-        raise RuntimeError("Test inference did not produce results.")
-    per_scan, overall, per_class, _ = test_results
+    save_metrics_csv(split_results_by_name, output_dir)
 
-    plot_path = output_dir / "metrics_summary.png"
+    summary_count = len(split_results_by_name) + int("test" in split_results_by_name)
     with tqdm(
-        total=1,
-        desc="Test metrics summary",
+        total=summary_count,
+        desc="Metrics summaries",
         unit="plot",
         file=sys.stdout,
         disable=False,
         dynamic_ncols=True,
     ) as progress:
-        save_metrics_plot(overall, per_class, per_scan, plot_path, args.dpi)
-        progress.update(1)
+        for split, split_results in split_results_by_name.items():
+            per_scan, overall, per_class, _ = split_results
+            save_metrics_plot(
+                overall,
+                per_class,
+                per_scan,
+                output_dir / f"metrics_summary_{split}.png",
+                args.dpi,
+                split,
+            )
+            progress.update(1)
+            if split == "test":
+                save_metrics_plot(
+                    overall,
+                    per_class,
+                    per_scan,
+                    output_dir / "metrics_summary.png",
 
+                    args.dpi,
+                    split,
+                )
+                progress.update(1)
 
 if __name__ == "__main__":
     main()

@@ -1,0 +1,815 @@
+PENJELASAN LENGKAP DAN STEP-BY-STEP
+PROTECTED LUNG PARENCHYMA SEGMENTATION V2
+============================================================
+
+Dokumen ini menjelaskan alur yang benar-benar diimplementasikan di direktori
+001_3_lung_parenchyma_segmentation_v2. Tujuan utamanya adalah menghasilkan
+mask paru biner dan volume parenkim paru ternormalisasi dari CT dada LIDC-IDRI
+atau LNDb.
+
+
+1. TUJUAN PIPELINE
+============================================================
+
+Pipeline menerima CT dada tiga dimensi dalam satuan Hounsfield Unit (HU), lalu
+menghasilkan dua array NumPy untuk setiap pemeriksaan:
+
+1. Mask paru final
+   - Bentuk: sama dengan volume CT, yaitu (jumlah_slice, tinggi, lebar).
+   - Tipe data: uint8.
+   - Nilai: hanya 0 dan 1.
+   - Nilai 1 menandai bagian yang dipertahankan sebagai paru.
+   - Nilai 0 menandai area di luar paru.
+
+2. Parenkim paru tersegmentasi
+   - Bentuk: sama dengan volume CT dan mask.
+   - Tipe data: float32.
+   - Rentang nilai: 0 sampai 1.
+   - Piksel di luar mask paru selalu dibuat 0.0.
+
+Mask nodul tidak digabungkan ke dalam dua keluaran tersebut. Informasi nodul
+hanya digunakan oleh quality_control.py untuk membuat gambar overlay PNG
+terpisah.
+
+
+2. GAMBARAN UMUM ALUR
+============================================================
+
+Alur utama pipeline adalah sebagai berikut:
+
+1. Menemukan dan membaca pemeriksaan CT.
+2. Mengubah seluruh sumber menjadi volume HU dengan bentuk (N, H, W).
+3. Membuat candidate mask pada setiap axial slice.
+4. Mencari satu clean bilateral reference slice yang paling dapat dipercaya.
+5. Mempropagasikan reference mask ke dua arah sepanjang volume.
+6. Menghapus sisa trakea dan memperbaiki batas mask.
+7. Melakukan median filtering pada CT asli.
+8. Melakukan lung windowing dan normalisasi ke rentang [0, 1].
+9. Menerapkan mask paru final pada CT yang telah dinormalisasi.
+10. Memvalidasi, menyimpan, dan melaporkan hasil.
+
+Pembuatan mask dan pembuatan parenkim berjalan dalam dua cabang yang saling
+berhubungan. Cabang pertama membangun final lung mask. Cabang kedua tetap
+menggunakan CT HU asli, lalu pada tahap terakhir menggabungkannya dengan final
+lung mask.
+
+
+3. STEP 1 - PENEMUAN DAN PEMBACAAN DATA CT
+============================================================
+
+Implementasi: step_1_ct_to_numpy.py
+
+Pipeline mendukung dua format sumber.
+
+3.1. LIDC-IDRI DICOM
+--------------------
+
+Untuk LIDC-IDRI, pipeline melakukan langkah berikut:
+
+1. Mencari folder pasien dengan pola LIDC-IDRI-*.
+2. Mengambil informasi scan yang sesuai dari database lokal pylidc.
+3. Memeriksa apakah direktori DICOM lokal benar-benar tersedia.
+4. Membandingkan jumlah file DICOM lokal dengan jumlah slice yang diharapkan
+   oleh pylidc.
+5. Mengabaikan seri kecil, localizer, atau seri yang tidak lengkap.
+6. Menyaring file berdasarkan StudyInstanceUID dan SeriesInstanceUID agar file
+   dari seri lain tidak ikut terbaca.
+7. Mengurutkan slice menurut posisi z dari ImagePositionPatient.
+8. Jika dua file memiliki posisi z yang sama, InstanceNumber digunakan untuk
+   menentukan file yang dipertahankan.
+9. Membaca pixel_array pada setiap DICOM.
+10. Mengonversi nilai piksel tersimpan menjadi HU dengan rumus:
+
+       HU = pixel_array × RescaleSlope + RescaleIntercept
+
+11. Menyatukan semua axial slice menjadi array int16 berbentuk (N, H, W).
+
+Nama keluaran LIDC dibuat stabil dengan menggabungkan patient ID dan bagian
+akhir study/series UID. Hal ini mengurangi risiko benturan nama antar-scan.
+
+3.2. LNDb MHD/RAW
+-----------------
+
+Untuk LNDb, pipeline melakukan langkah berikut:
+
+1. Mencari file dengan ekstensi .mhd.
+2. Membaca baris ElementDataFile dari header MHD.
+3. Memastikan payload RAW yang dirujuk benar-benar tersedia.
+4. Mengabaikan pemeriksaan yang payload-nya tidak lengkap.
+5. Membaca image menggunakan SimpleITK.
+6. Mengubah SimpleITK image menjadi array NumPy.
+7. Mengonversi volume menjadi int16.
+8. Memastikan urutan array berbentuk (slice, height, width).
+
+3.3. Validasi volume CT awal
+---------------------------
+
+Sebelum segmentasi, volume harus memenuhi kontrak berikut:
+
+1. Array harus tiga dimensi.
+2. Dimensi harus berbentuk (N, H, W).
+3. Volume harus memiliki minimal dua slice.
+4. Tinggi dan lebar masing-masing minimal 32 piksel.
+5. Jika tipe data bukan integer, seluruh nilainya harus finite, yaitu bukan NaN
+   dan bukan infinity.
+
+Volume yang tidak memenuhi kontrak dihentikan dengan error agar hasil yang
+tidak valid tidak diteruskan ke tahap segmentasi.
+
+
+4. STEP 2 - PEMBUATAN CANDIDATE MASK PER SLICE
+============================================================
+
+Implementasi: candidate_mask() dan build_candidate_volume() di
+step_2_segmentation.py
+
+Tahap ini sengaja membuat mask yang sensitif. Candidate mask belum dianggap
+sebagai hasil akhir; mask tersebut masih dapat berisi komponen non-paru yang
+akan dibersihkan pada tahap reference selection dan propagation.
+
+Setiap axial slice diproses melalui urutan berikut.
+
+4.1. Threshold berdasarkan HU
+-----------------------------
+
+Parameter:
+
+    HU_THRESHOLD = -320
+
+Operasi:
+
+    candidate = image < -320 HU
+
+Piksel yang lebih kecil dari -320 HU dibuat foreground. Area paru biasanya
+memiliki densitas rendah karena mengandung udara, sehingga banyak bagian paru
+masuk ke dalam foreground. Udara di luar tubuh dan beberapa struktur lain juga
+dapat masuk, sehingga diperlukan tahap pembersihan berikutnya.
+
+4.2. Clear border
+-----------------
+
+Semua connected component yang menyentuh batas citra dihapus. Tujuan utamanya
+adalah menghilangkan udara luar tubuh yang terhubung langsung dengan tepi
+gambar.
+
+4.3. Menghapus meja CT yang lebar dan datar
+-------------------------------------------
+
+Setiap connected component diperiksa berdasarkan bounding box dan centroid.
+Komponen dianggap menyerupai meja CT jika seluruh kondisi berikut terpenuhi:
+
+1. Centroid vertikal berada di bagian bawah citra:
+
+       centroid_y > 70% × tinggi_citra
+
+2. Lebar komponen cukup besar:
+
+       component_width > 40% × lebar_citra
+
+3. Bentuknya datar:
+
+       component_height / component_width < 0.35
+
+Hanya komponen yang secara bersamaan berada di bawah, lebar, dan datar yang
+dihapus. Kriteria ini dibuat konservatif agar bagian paru tidak terhapus hanya
+karena berada dekat bagian bawah citra.
+
+4.4. Mempertahankan empat komponen terbesar
+-------------------------------------------
+
+Parameter:
+
+    NUM_LARGEST_COMPONENTS = 4
+
+Connected component diurutkan berdasarkan luas. Hanya empat komponen terbesar
+yang dipertahankan. Jumlah empat digunakan pada candidate mask agar paru kiri
+dan kanan tetap dapat dipertahankan sekaligus memberi toleransi terhadap
+struktur tambahan sebelum reference mask dibersihkan lebih ketat.
+
+4.5. Binary hole filling
+------------------------
+
+Lubang di dalam setiap area foreground diisi menggunakan binary_fill_holes.
+Hasilnya dikonversi menjadi mask boolean, lalu disimpan ke candidate volume
+bertipe uint8.
+
+Urutan tahap candidate mask adalah:
+
+    threshold
+        -> clear border
+        -> remove wide/flat table
+        -> keep four largest components
+        -> fill holes
+
+
+5. STEP 3 - PEMILIHAN CLEAN REFERENCE SLICE
+============================================================
+
+Implementasi: select_reference_index(), clean_reference(), dan
+has_bilateral_lung_components() di step_2_segmentation.py
+
+Reference slice adalah dasar untuk melindungi komponen paru ketika mask
+dipropagasikan ke slice lain. Pemilihan reference yang bersih penting karena
+kesalahan pada reference dapat menyebar ke arah superior dan inferior volume.
+
+5.1. Urutan pencarian dari bagian tengah volume
+-----------------------------------------------
+
+1. Pipeline menentukan indeks tengah:
+
+       middle = jumlah_slice // 2
+
+2. Semua indeks diurutkan menurut jaraknya dari indeks tengah.
+3. Candidate di bagian tengah diperiksa terlebih dahulu.
+4. Jika belum memenuhi kriteria, pipeline bergerak ke slice terdekat berikutnya
+   secara bergantian di sekitar bagian tengah.
+
+Bagian tengah diprioritaskan karena pada banyak CT dada, paru kiri dan kanan
+terlihat jelas dan memiliki area cukup besar pada wilayah tersebut.
+
+5.2. Membersihkan setiap calon reference
+----------------------------------------
+
+Fungsi clean_reference() menerapkan langkah berikut:
+
+A. Menghapus meja CT dengan kriteria lebar dan datar yang sama seperti tahap
+   candidate mask.
+
+B. Menghapus komponen perifer kecil khusus pada calon reference.
+
+   Komponen dihapus jika:
+
+   - luasnya kurang dari 2% luas citra; dan
+   - centroid_y berada di luar rentang 30% sampai 60% tinggi citra.
+
+   Pembersihan perifer kecil hanya diterapkan secara ketat pada reference agar
+   propagation dimulai dari seed yang bersih.
+
+C. Menghapus komponen yang menyerupai trakea.
+
+   Komponen dihapus hanya jika seluruh kondisi berikut terpenuhi:
+
+   - luas komponen kurang dari 0.69% luas citra;
+   - posisi horizontal sangat dekat pusat citra, yaitu selisih centroid_x dari
+     pusat kurang dari 5% lebar citra;
+   - posisinya anterior, yaitu centroid_y kurang dari 55% tinggi citra.
+
+   Kriteria gabungan ini mencegah penghapusan agresif pada bagian paru.
+
+D. Mempertahankan maksimal dua connected component terbesar.
+
+   Pada clean reference, jumlah komponen dipersempit menjadi dua karena target
+   utamanya adalah paru kiri dan paru kanan.
+
+E. Mengisi lubang dengan binary_fill_holes.
+
+5.3. Pemeriksaan bilateral
+--------------------------
+
+Reference yang diutamakan harus menunjukkan komponen paru bermakna pada kedua
+sisi gambar.
+
+1. Connected component dihitung kembali.
+2. Hanya komponen dengan luas minimal 1% luas citra yang dianggap substansial.
+3. Harus ada minimal satu centroid komponen di sebelah kiri titik tengah.
+4. Harus ada minimal satu centroid komponen di sebelah kanan titik tengah.
+
+Jika kondisi kiri dan kanan terpenuhi, slice tersebut dipilih sebagai clean
+bilateral reference.
+
+5.4. Mekanisme fallback
+-----------------------
+
+Jika tidak ditemukan reference bilateral, pipeline menggunakan calon clean
+reference non-empty yang paling dekat dengan bagian tengah. Jika seluruh calon
+reference kosong, pipeline menghentikan proses dengan error karena tidak ada
+seed yang dapat digunakan.
+
+
+6. STEP 4 - PROTECTED BIDIRECTIONAL PROPAGATION
+============================================================
+
+Implementasi: propagate_bidirectionally(), propagate_one_slice(), dan
+match_candidate_components() di step_2_segmentation.py
+
+Tujuan propagation adalah mengikuti bentuk paru antar-slice sambil hanya
+mempertahankan candidate component yang memiliki hubungan spasial dengan mask
+paru valid sebelumnya.
+
+6.1. Dua arah propagation
+-------------------------
+
+Propagation dilakukan dalam dua pass:
+
+1. Dari reference index menuju slice 0.
+2. Dari reference index menuju slice terakhir.
+
+Sebelum arah kedua dimulai, last_valid_reference dikembalikan ke clean
+reference asli. Dengan demikian, kegagalan pada satu arah tidak memengaruhi
+awal propagation pada arah yang lain.
+
+6.2. Last-valid reference
+-------------------------
+
+Pipeline mempertahankan variabel last_valid_reference. Variabel ini hanya
+diperbarui apabila propagation pada slice saat ini berhasil. Jika sebuah slice
+gagal, reference yang terakhir valid tetap digunakan pada slice berikutnya.
+
+Perilaku ini melindungi pipeline dari kegagalan tunggal agar tidak langsung
+menyebabkan seluruh sisa volume kehilangan reference.
+
+6.3. Jadwal dilatasi reference support
+--------------------------------------
+
+Parameter:
+
+    REFERENCE_DILATION_SCHEDULE = (3, 6, 10, 15)
+
+Untuk setiap candidate slice, last_valid_reference didilatasi secara bertahap:
+
+1. Coba dilatasi 3 piksel.
+2. Jika belum ada seed valid, coba 6 piksel.
+3. Jika belum berhasil, coba 10 piksel.
+4. Jika masih belum berhasil, coba 15 piksel.
+
+Dilatasi menghasilkan reference support yang lebih toleran terhadap perubahan
+posisi dan bentuk paru antar-slice. Pipeline berhenti pada ukuran dilatasi
+pertama yang menghasilkan overlap valid.
+
+6.4. Pencocokan candidate component
+-----------------------------------
+
+Untuk setiap connected component dalam candidate mask:
+
+1. Hitung irisan antara komponen dan reference support.
+2. Hitung jumlah piksel pada irisan tersebut.
+3. Pertahankan komponen hanya jika overlap minimal 10 piksel.
+
+Parameter:
+
+    MIN_COMPONENT_OVERLAP_PIXELS = 10
+
+Dengan cara ini, sebuah komponen tidak dipilih hanya karena posisinya dekat;
+komponen tersebut harus benar-benar mempunyai overlap dengan support dari mask
+paru sebelumnya.
+
+6.5. Binary propagation di dalam komponen terpilih
+--------------------------------------------------
+
+Piksel overlap digunakan sebagai seed. Binary propagation kemudian berkembang
+dari seed, tetapi dibatasi hanya di dalam matched components. Setelah itu,
+lubang pada hasil diisi.
+
+Jika berhasil:
+
+1. Hasil disimpan sebagai protected mask slice saat ini.
+2. Hasil menjadi last_valid_reference baru.
+
+Jika gagal pada seluruh jadwal dilatasi:
+
+1. Slice saat ini diisi dengan mask kosong.
+2. Indeks slice dicatat sebagai failed-overlap slice jika candidate aslinya
+   tidak kosong.
+3. Last-valid reference tidak diganti.
+4. Pipeline melanjutkan ke slice berikutnya.
+
+
+7. STEP 5 - FINALISASI DAN PERBAIKAN MASK
+============================================================
+
+Implementasi: finalize_mask_volume(), remove_trachea(), dan repair_boundary()
+di step_2_segmentation.py
+
+Setiap protected mask diproses secara independen melalui langkah berikut.
+
+7.1. Penghapusan sisa trakea
+----------------------------
+
+Kriteria trakea yang sama diterapkan kembali setelah propagation:
+
+- area kurang dari 0.69% luas citra;
+- sangat dekat pusat horizontal citra;
+- berada di wilayah anterior.
+
+Tahap kedua ini menghapus residual trachea yang mungkin ikut terbawa atau baru
+muncul selama propagation.
+
+7.2. Perbaikan batas per connected component
+---------------------------------------------
+
+Parameter:
+
+    BOUNDARY_REPAIR_RADIUS = 16
+
+Setiap connected component diperbaiki secara terpisah:
+
+1. Cari seluruh koordinat foreground komponen.
+2. Buat bounding crop yang mengelilingi komponen.
+3. Tambahkan padding berdasarkan radius 16.
+4. Terapkan binary closing dengan structuring element berbentuk disk radius 16.
+5. Isi lubang pada hasil closing.
+6. Tempatkan hasil crop kembali ke posisi asal.
+7. Gabungkan semua komponen yang telah diperbaiki.
+
+Binary closing adalah operasi dilatasi yang diikuti erosi. Operasi ini membantu
+menutup celah kecil dan memperbaiki cekungan batas tanpa melakukan closing pada
+seluruh gambar 512 × 512. Pemrosesan dalam padded crop mengurangi biaya memori
+dan komputasi.
+
+7.3. Konversi final mask
+------------------------
+
+Hasil final dikonversi menjadi uint8 tanpa menyalin data jika memungkinkan.
+Nilai akhir harus hanya 0 dan 1.
+
+
+8. METRIK DIAGNOSTIK SEGMENTASI
+============================================================
+
+Setelah final mask dibuat, pipeline menghitung metrik berikut:
+
+1. reference_index
+   Indeks slice yang dipilih sebagai clean reference.
+
+2. failed_overlap_count
+   Jumlah candidate slice non-empty yang gagal memperoleh overlap valid.
+
+3. failed_overlap_slices
+   Daftar indeks slice yang mengalami kegagalan overlap.
+
+4. non_empty_start
+   Indeks pertama yang memiliki final mask non-empty.
+
+5. non_empty_end
+   Indeks terakhir yang memiliki final mask non-empty.
+
+6. foreground_fraction
+   Rata-rata nilai mask pada seluruh volume. Nilai ini menunjukkan proporsi
+   voxel yang dianggap sebagai paru.
+
+7. mean_adjacent_dice
+   Rata-rata Dice coefficient antara mask pada dua slice berurutan.
+
+Untuk dua mask A dan B, Dice dihitung sebagai:
+
+    Dice(A, B) = 2 × |A ∩ B| / (|A| + |B|)
+
+Jika kedua mask kosong, Dice didefinisikan sebagai 1.0. Mean adjacent Dice
+dapat membantu mendeteksi perubahan mask yang terlalu mendadak antar-slice.
+
+
+9. STEP 6 - MEDIAN FILTERING PADA CT ASLI
+============================================================
+
+Implementasi: step_3_median_filter.py dan filter_normalize_and_mask() di
+step_4_normalize_and_mask.py
+
+Parameter:
+
+    MEDIAN_FILTER_SIZE = (1, 3, 3)
+
+Artinya:
+
+- ukuran 1 pada dimensi slice;
+- ukuran 3 pada dimensi tinggi;
+- ukuran 3 pada dimensi lebar.
+
+Median filter diterapkan secara 2D pada setiap axial slice. Tidak ada
+pencampuran informasi antar-slice. Filter mengganti nilai setiap piksel dengan
+median dari neighborhood 3 × 3 sehingga noise impulsif berkurang, tetapi batas
+anatomi lebih terjaga dibandingkan filter rata-rata sederhana.
+
+Penting: tahap ini memproses CT HU asli, bukan nilai mask dan bukan candidate
+volume.
+
+
+10. STEP 7 - LUNG WINDOWING
+============================================================
+
+Implementasi: step_4_normalize_and_mask.py
+
+Parameter:
+
+    WINDOW_LEVEL = -600 HU
+    WINDOW_WIDTH = 1600 HU
+
+Batas bawah dan atas dihitung sebagai:
+
+    lower = level - width / 2
+          = -600 - 1600 / 2
+          = -1400 HU
+
+    upper = level + width / 2
+          = -600 + 1600 / 2
+          = 200 HU
+
+Setiap piksel kemudian di-clip:
+
+- nilai di bawah -1400 HU menjadi -1400 HU;
+- nilai di atas 200 HU menjadi 200 HU;
+- nilai di antara kedua batas dipertahankan.
+
+Window tersebut menekankan rentang densitas yang relevan untuk parenkim paru.
+
+
+11. STEP 8 - NORMALISASI KE RENTANG [0, 1]
+============================================================
+
+Setelah clipping, nilai dikonversi menjadi float32 dan dinormalisasi dengan:
+
+    normalized = (clipped_HU - lower) / (upper - lower)
+
+Karena lower = -1400 dan upper - lower = 1600, rumusnya menjadi:
+
+    normalized = (clipped_HU + 1400) / 1600
+
+Contoh:
+
+- -1400 HU menjadi 0.0.
+- -600 HU menjadi 0.5.
+- 200 HU menjadi 1.0.
+
+Clipping dilakukan sebelum normalisasi sehingga seluruh nilai hasil berada
+dalam rentang 0 sampai 1.
+
+
+12. STEP 9 - MENERAPKAN FINAL LUNG MASK
+============================================================
+
+Final mask diterapkan pada hasil median filtering dan normalisasi:
+
+    jika mask == 1: pertahankan nilai parenkim ternormalisasi
+    jika mask == 0: ubah nilai menjadi 0.0
+
+Operasi tersebut menghasilkan segmented lung parenchyma dengan latar belakang
+nol. Hanya bagian yang dipilih final lung mask yang menyimpan informasi CT.
+
+Tahap filter, window, normalisasi, dan masking dilakukan satu slice pada satu
+waktu. Output langsung ditulis ke array float32 final. Strategi ini menghindari
+penyimpanan beberapa volume penuh secara bersamaan.
+
+
+13. STEP 10 - VALIDASI KELUARAN
+============================================================
+
+Implementasi: validate_outputs() di run_pipeline.py
+
+Sebelum hasil diterima, pipeline memeriksa seluruh kondisi berikut:
+
+1. Shape CT, mask, dan parenkim harus sama.
+2. Tipe final mask harus uint8.
+3. Nilai mask harus berada pada rentang 0 sampai 1.
+4. Tipe parenkim harus float32.
+5. Nilai parenkim harus berada pada rentang 0 sampai 1.
+6. Setiap slice parenkim harus berisi nilai finite.
+7. Semua piksel parenkim di luar final mask harus tepat 0.0.
+
+Jika salah satu syarat gagal, keluaran tidak diterima dan pemeriksaan tersebut
+dilaporkan sebagai failed.
+
+
+14. STEP 11 - PENYIMPANAN HASIL
+============================================================
+
+Implementasi: run_pipeline.py
+
+14.1. Lokasi keluaran
+---------------------
+
+Root keluaran:
+
+    000_dataset_v2/lung_parenchyma_v3
+
+Struktur utamanya:
+
+    masks/lidc/
+    masks/lndb/
+    parenchyma/lidc/
+    parenchyma/lndb/
+    reports/
+    quality_control/
+
+Nama file:
+
+    <scan_id>_mask.npy
+    <scan_id>_parenchyma.npy
+
+14.2. Atomic save
+-----------------
+
+Array tidak langsung ditulis ke nama akhir. Pipeline terlebih dahulu menulis
+file dengan suffix sementara .tmp. Setelah penulisan selesai, file sementara
+menggantikan tujuan akhir.
+
+Cara ini mengurangi risiko file akhir setengah tertulis ketika proses terhenti
+di tengah penyimpanan.
+
+14.3. Resume dan overwrite
+--------------------------
+
+Secara default, satu studi dilewati jika mask dan parenkimnya sudah tersedia.
+Statusnya menjadi skipped_existing. Perilaku ini memungkinkan batch yang
+terputus dijalankan kembali dengan aman.
+
+Opsi --overwrite memaksa perhitungan dan penggantian hasil yang sudah ada.
+
+Opsi --no-save menjalankan seluruh segmentasi dan validasi tanpa menulis array
+besar. Mode ini cocok untuk validasi awal sumber data.
+
+
+15. STEP 12 - LAPORAN BATCH
+============================================================
+
+Setelah batch selesai, pipeline menyimpan laporan CSV dan JSON. Satu baris
+laporan mewakili satu pemeriksaan dan dapat berisi:
+
+- dataset dan scan ID;
+- source path;
+- status proses;
+- pesan error;
+- shape dan tipe data sumber;
+- nilai HU minimum dan maksimum;
+- path keluaran;
+- metrik segmentasi;
+- tipe dan rentang keluaran;
+- waktu proses dalam detik.
+
+Status yang umum:
+
+- written: hasil berhasil divalidasi dan disimpan;
+- validated: pipeline lengkap berhasil pada mode --no-save;
+- skipped_existing: pasangan output sudah tersedia;
+- failed: terjadi error saat membaca, memproses, atau memvalidasi scan.
+
+Batch secara default melanjutkan studi berikutnya setelah sebuah studi gagal.
+Opsi --fail-fast dapat digunakan untuk berhenti pada kegagalan pertama.
+
+
+16. STEP 13 - QUALITY CONTROL DENGAN NODUL
+============================================================
+
+Implementasi: quality_control.py
+
+Quality control dijalankan setelah mask dan parenkim tersimpan. Tahap ini tidak
+mengubah file NPY hasil segmentasi.
+
+Untuk studi yang mempunyai consensus nodule data, quality control menghasilkan
+satu PNG yang berisi:
+
+1. Segmented lung parenchyma sebagai background grayscale.
+2. Warna kontras berbeda untuk setiap nodul.
+3. Label Cluster N untuk LIDC atau Nodule N untuk LNDb.
+4. Kategori Benign atau Malignant.
+5. Informasi slice pada judul panel.
+6. Informasi whole-nodule inclusion pada legend.
+
+Studi tanpa consensus nodule tidak menghasilkan PNG kosong dan dilaporkan
+sebagai skipped_no_nodules.
+
+
+17. MANAJEMEN MEMORI
+============================================================
+
+Pipeline dirancang untuk memproses satu studi pada satu waktu.
+
+Di dalam satu studi:
+
+1. Candidate mask buffer dapat digunakan ulang untuk protected propagation.
+2. Buffer yang sama dapat digunakan kembali ketika final boundary repair.
+3. Median filtering dilakukan satu slice pada satu waktu.
+4. Windowing dan normalisasi dilakukan satu slice pada satu waktu.
+5. Mask langsung diterapkan sebelum slice ditulis ke output float32 final.
+
+Dengan strategi ini, pipeline tidak perlu menahan candidate volume, protected
+volume, repaired volume, median-filtered volume, dan normalized volume sebagai
+lima array penuh yang terpisah pada saat yang sama.
+
+
+18. RINGKASAN PARAMETER PENTING
+============================================================
+
+Candidate mask:
+
+    HU threshold                         = -320 HU
+    Jumlah komponen terbesar             = 4
+
+Penghapusan meja CT:
+
+    Lower centroid ratio                 = 0.70
+    Minimum width ratio                  = 0.40
+    Maximum height/width ratio           = 0.35
+
+Pembersihan reference:
+
+    Small peripheral area threshold      = 0.02
+    Rentang centroid_y yang dipertahankan = 0.30 sampai 0.60
+
+Penghapusan trakea:
+
+    Trachea area threshold               = 0.0069
+    Center half-width ratio              = 0.05
+    Maximum anterior y ratio             = 0.55
+
+Propagation:
+
+    Dilation schedule                    = 3, 6, 10, 15 piksel
+    Minimum component overlap            = 10 piksel
+
+Boundary repair:
+
+    Disk radius                          = 16 piksel
+
+Parenkim:
+
+    Median filter                        = 1 × 3 × 3
+    Window level                         = -600 HU
+    Window width                         = 1600 HU
+    Window range                         = [-1400, 200] HU
+    Output range                         = [0, 1]
+
+
+19. CARA MEMBACA VISUALISASI PADA DIAGRAM
+============================================================
+
+Diagram lung_parenchyma_segmentation_pipeline.png menggunakan CT nyata dari:
+
+    Pasien                 : LIDC-IDRI-0001
+    Series                 : 30178 / 03192
+    Jumlah slice           : 133
+    Clean reference index  : 66
+    Propagation example    : 74
+
+Arti setiap visual:
+
+1. Original axial CT
+   CT asli ditampilkan menggunakan lung window. Nilai yang diproses pipeline
+   tetap berupa HU, walaupun gambar pratinjau terlihat grayscale.
+
+2. Threshold
+   Overlay cyan menunjukkan seluruh piksel dengan nilai kurang dari -320 HU.
+   Pada tahap ini, foreground masih dapat mencakup udara dan artefak non-paru.
+
+3. Candidate mask
+   Overlay teal menunjukkan hasil setelah clear border, penghapusan meja,
+   pemilihan empat komponen terbesar, dan hole filling.
+
+4. Clean bilateral reference
+   Overlay ungu menunjukkan dua komponen paru yang telah dibersihkan dan
+   dipilih sebagai seed utama.
+
+5. Propagated slice
+   Overlay ungu pada slice lain menunjukkan hasil pencocokan dengan support
+   dari last-valid reference.
+
+6. Final lung mask
+   Overlay oranye menunjukkan hasil setelah residual trachea removal,
+   per-component binary closing, dan hole filling.
+
+7. Filtered CT
+   Menunjukkan CT setelah median filter dan lung windowing, sebelum latar di
+   luar paru dihapus.
+
+8. Parenchyma
+   Menunjukkan hasil akhir float32 setelah normalisasi dan penerapan final mask.
+   Area di luar paru berwarna hitam karena nilainya dibuat 0.0.
+
+
+20. URUTAN EKSEKUSI YANG DIREKOMENDASIKAN
+============================================================
+
+Jalankan perintah dari root proyek.
+
+1. Menjalankan regression test cepat:
+
+   conda run -n nodule_py310 python \
+     001_3_lung_parenchyma_segmentation_v2/test_pipeline.py
+
+2. Memvalidasi semua sumber tanpa menyimpan array besar:
+
+   conda run -n nodule_py310 python \
+     001_3_lung_parenchyma_segmentation_v2/run_pipeline.py all --no-save
+
+3. Menjalankan batch produksi dan menyimpan hasil:
+
+   conda run -n nodule_py310 python \
+     001_3_lung_parenchyma_segmentation_v2/run_pipeline.py all
+
+4. Membuat PNG quality control setelah hasil NPY tersedia:
+
+   conda run -n nodule_py310 python \
+     001_3_lung_parenchyma_segmentation_v2/quality_control.py all
+
+
+21. KESIMPULAN
+============================================================
+
+Protected Lung Parenchyma Segmentation V2 tidak hanya melakukan threshold CT.
+Pipeline membangun candidate mask yang sensitif, memilih seed bilateral yang
+bersih, melindungi kontinuitas paru melalui bidirectional propagation, dan
+memperbaiki batas setiap komponen secara konservatif. Final mask kemudian
+digabungkan dengan CT asli yang telah difilter, di-window, dan dinormalisasi.
+
+Hasil akhirnya adalah pasangan mask uint8 dan segmented parenchyma float32 yang
+memiliki shape identik, rentang nilai terkontrol, latar belakang nol, metrik
+diagnostik, serta laporan batch yang dapat digunakan untuk pemeriksaan kualitas
+dan tahap machine-learning berikutnya.
