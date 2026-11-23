@@ -297,6 +297,100 @@ def source_metric_table(
     return pd.DataFrame.from_records(records)
 
 
+def export_prediction_table(
+    frame: pd.DataFrame,
+    level: str,
+    output_path: Path,
+) -> pd.DataFrame:
+    """Export reviewer-ready predictions with explicit identifier columns."""
+
+    identifier_columns = ["dataset", "patient_id", "cv_nodule_id"]
+    if level == "slice":
+        identifier_columns.append("filename")
+    if frame.duplicated(identifier_columns).any():
+        raise ValueError(
+            f"Duplicate {level}-level prediction identifiers were found."
+        )
+
+    exported = pd.DataFrame(
+        {
+            "dataset_source": frame["dataset"].astype(str),
+            "patient_id": frame["patient_id"].astype(str),
+            "nodule_id": frame["cv_nodule_id"].astype(str),
+            "ground_truth_label": np.where(
+                frame["target"].astype(int).eq(1), "malignant", "benign"
+            ),
+            "ensemble_malignant_probability": frame["probability"].astype(float),
+            "predicted_label": np.where(
+                frame["prediction"].astype(int).eq(1), "malignant", "benign"
+            ),
+        }
+    )
+    if level == "slice":
+        exported.insert(3, "slice_id", frame["filename"].astype(str))
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    exported.to_csv(output_path, index=False)
+    return exported
+
+
+def plot_source_specific_metrics(
+    metrics: pd.DataFrame,
+    model_name: str,
+    output_path: Path,
+    dpi: int,
+) -> None:
+    """Summarize source-specific slice- and nodule-level performance."""
+
+    metric_labels = {
+        "accuracy": "Accuracy",
+        "sensitivity": "Sensitivity",
+        "specificity": "Specificity",
+        "precision": "Precision",
+        "f1_score": "F1-score",
+    }
+    scope_styles = {
+        "Combined": {"color": "#000000", "marker": "o", "linestyle": "-"},
+        "LIDC-IDRI": {"color": "#0072B2", "marker": "s", "linestyle": "--"},
+        "LNDb": {"color": "#D55E00", "marker": "^", "linestyle": ":"},
+    }
+    figure, axes = plt.subplots(1, 2, figsize=(7.16, 3.20), sharey=True)
+    positions = np.arange(len(METRIC_NAMES))
+    for axis, level in zip(axes, ("slice", "nodule"), strict=True):
+        level_metrics = metrics.loc[
+            metrics["evaluation_level"].eq(level)
+        ].set_index("dataset_scope")
+        for scope, style in scope_styles.items():
+            values = level_metrics.loc[scope, list(METRIC_NAMES)].to_numpy(float)
+            axis.plot(
+                positions,
+                values,
+                label=scope,
+                color=style["color"],
+                marker=style["marker"],
+                linestyle=style["linestyle"],
+                linewidth=1.25,
+                markersize=3.2,
+                markerfacecolor="white",
+            )
+        axis.set_xticks(
+            positions,
+            [metric_labels[name] for name in METRIC_NAMES],
+            rotation=30,
+            ha="right",
+        )
+        axis.set_ylim(0, 1.02)
+        axis.set_title(f"{level.capitalize()} level")
+        axis.set_ylabel("Metric value" if level == "slice" else "")
+        style_axis(axis)
+    axes[1].legend(loc="lower right", frameon=False)
+    figure.suptitle(model_name, fontsize=8)
+    figure.subplots_adjust(
+        left=0.09, right=0.995, bottom=0.24, top=0.88, wspace=0.16
+    )
+    save_figure(figure, output_path, dpi)
+
+
 def plot_confusion(
     row: pd.Series,
     model_name: str,
@@ -753,6 +847,16 @@ def run_single_model_evaluation(
         metadata_path,
         source_dir / "source_class_split_distribution.csv",
     )
+    export_prediction_table(
+        slice_predictions,
+        "slice",
+        source_dir / "held_out_slice_predictions.csv",
+    )
+    export_prediction_table(
+        nodule_predictions,
+        "nodule",
+        source_dir / "held_out_nodule_predictions.csv",
+    )
     metric_frames = []
     roc_frames = []
     calibration_frames = []
@@ -793,6 +897,12 @@ def run_single_model_evaluation(
 
     metrics = pd.concat(metric_frames, ignore_index=True)
     metrics.to_csv(source_dir / "source_specific_metrics.csv", index=False)
+    plot_source_specific_metrics(
+        metrics,
+        model_name,
+        source_dir / "source_specific_performance.png",
+        dpi,
+    )
     metrics.to_csv(confusion_dir / "classification_metrics_summary.csv", index=False)
     pd.concat(roc_frames, ignore_index=True).to_csv(
         roc_pr_dir / "roc_auc_average_precision_summary.csv", index=False
@@ -801,7 +911,6 @@ def run_single_model_evaluation(
         calibration_dir / "calibration_summary.csv", index=False
     )
     training_curve_outputs(model_dir, model_name, training_dir, dpi)
-    refresh_legacy_figures(model_dir, model_name, slice_predictions, dpi)
     return {
         "source_specific": source_dir,
         "confusion_matrices": confusion_dir,

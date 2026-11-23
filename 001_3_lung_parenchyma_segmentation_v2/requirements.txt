@@ -1,9 +1,0 @@
-numpy
-matplotlib
-pandas
-pydicom
-pylidc
-scipy
-SimpleITK
-scikit-image
-tqdm
