@@ -1,10 +1,7 @@
 # Patient-Level Dataset Splitting
 
 This directory creates reproducible holdout splits and classification folds
-for the prepared LIDC-IDRI and LNDb slice dataset. It replaces the three
-standalone scripts previously stored in `001_preprocessing/utils` with one
-modular pipeline.
-
+for the prepared LIDC-IDRI and LNDb slice dataset.
 ## Processing flow
 
 ```text

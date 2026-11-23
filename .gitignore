@@ -12,6 +12,14 @@ env/
 .vscode/
 .idea/
 
+# Local agent and cloud configuration
+.agents/
+.aws/
+.codex/
+
+# Local visualization workspace
+_visualization/
+
 # Notebook
 .ipynb_checkpoints/
 
